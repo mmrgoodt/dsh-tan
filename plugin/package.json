@@ -1,0 +1,43 @@
+{
+  "name": "dsh-tan",
+  "version": "0.3.1",
+  "description": "给 DeepSeek Harness 装一个会遗忘、会沉淀、有性格的记忆（本地 SQLite；设置页为可选安装）",
+  "type": "module",
+  "main": "./lib/index.js",
+  "exports": {
+    ".": "./lib/index.js",
+    "./cordis.patch.yml": "./cordis.patch.yml",
+    "./package.json": "./package.json"
+  },
+  "files": [
+    "lib/index.js",
+    "cordis.patch.yml",
+    "package.json",
+    "scripts/",
+    "lib/",
+    "optional/"
+  ],
+  "keywords": [
+    "dsh",
+    "dsh-plugin",
+    "deepseek-harness",
+    "memory",
+    "hippocampus"
+  ],
+  "license": "MIT",
+  "dsh": {
+    "engines": {
+      "dsh": "0.2.1-rc.4"
+    },
+    "bundle": {
+      "patch": "./cordis.patch.yml"
+    }
+  },
+  "peerDependencies": {
+    "@deepseek-ai/cordis": "~4.0.5"
+  },
+  "scripts": {
+    "postinstall": "node scripts/fetch-python.cjs",
+    "fetch-python": "node scripts/fetch-python.cjs"
+  }
+}
