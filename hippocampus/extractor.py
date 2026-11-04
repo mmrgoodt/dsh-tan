@@ -32,6 +32,55 @@ MAX_CONTENT = 600
 MIN_CONTENT = 3
 
 
+# DSH 会把整段 system prompt 和用户消息合并成一个事件，
+# 取文本时容易把系统提示当成人说的话。这些标记出现就整条丢掉。
+_SYSTEM_MARKERS = (
+    "Current runtime context",
+    "Time sampled while preparing",
+    "OPERATOR ANCHOR",
+    "project_instructions",
+    "PRIME DIRECTIVE",
+    "Capability selection by task",
+    "available_skills",
+    "MODE: UNRESTRICTED SANDBOX",
+    "Shell routing: ops_bash",
+    "FORMAT RULES — MANDATORY",
+    "还欠着的\n· 今天那个",
+)
+
+
+def is_report_text(text, role):
+    """判断这是不是我自己的长篇报告（不该整段当记忆）
+
+    线索：有 markdown 结构（## 标题 / | 表格 / ``` 代码块）
+    这种是输出格式，不是「记得的事」。
+    """
+    if role != "assistant":
+        return False
+    t = str(text or "")
+    if len(t) < 200:
+        return False
+    markers = 0
+    if "## " in t:
+        markers += 1
+    if "| " in t and "---" in t:
+        markers += 1
+    if "```" in t:
+        markers += 1
+    return markers >= 2
+
+
+def is_system_text(text):
+    """判断这段文本是不是系统提示泄漏进来的"""
+    if not text:
+        return False
+    t = str(text)
+    for m in _SYSTEM_MARKERS:
+        if m in t:
+            return True
+    return False
+
+
 def looks_like_junk(text):
     """无信息量的垃圾：重复字符刷屏、纯符号、太短"""
     t = (text or "").strip()
@@ -133,6 +182,21 @@ def extract(text: str, role: str = "user") -> dict:
       }
     """
     t = _clean(text)
+
+    # 系统提示泄漏：整条丢掉，不写库
+    if is_system_text(t):
+        return {
+            "keep": False, "noise": True, "layer": "L1",
+            "content": "", "loops": [], "entities": [],
+            "valence": 0.0, "emotion": 1.0, "protected": False,
+        }
+
+    # 我自己的长篇报告：只留开头一句结论
+    is_report = is_report_text(t, role)
+    if is_report:
+        t = t.strip()
+        head = t.split(chr(10))[0][:80]
+        t = head
     res = {
         "keep": False, "noise": False, "layer": "L1",
         "content": t, "loops": [], "entities": [],
