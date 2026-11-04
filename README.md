@@ -23,28 +23,18 @@
 
 ## 快速开始
 
-### 方式一：npm（推荐，有 Node 环境）
+### 方式一：下载压缩包（推荐，最简单）
 
-```bash
-npm install dsh-tan
-```
+1. 打开 [Releases](https://github.com/mmrgoodt/dsh-tan/releases)，下载最新的 `dsh-tan-v0.3.1.zip`（11 MB）
+2. 解压到任意目录（路径最好不带中文）
+3. 双击 `一键安装.bat`
+4. 按提示重启 DSH（托盘图标右键 → 退出 → 重新打开）
 
-`postinstall` 会自动做两件事：
+**不需要装 Python**——压缩包里自带便携版 Python 3.11，脚本会自动用它。
 
-1. 下载便携版 Python 3.11（10.7 MB，华为云镜像，约 5 秒）
-2. 把插件登记到 DSH 的 profile 里
+装完后侧边栏出现「记」Tan。
 
-然后重启 DSH（托盘图标右键 → 退出 → 重新打开），侧边栏出现「记」Tan。
-
-### 方式二：压缩包（不需要 Node）
-
-1. 打开 [Releases](https://github.com/mmrgoodt/dsh-tan/releases)，下载最新的 `dsh-tan-v0.3.1.zip`，解压到任意目录（路径最好不带中文）
-2. 双击 `一键安装.bat`
-3. 按提示重启 DSH
-
-脚本会自动找内置 Python、启动服务、装进 DSH。
-
-### 方式三：源码
+### 方式二：源码
 
 ```bash
 git clone https://github.com/mmrgoodt/dsh-tan.git
@@ -54,6 +44,21 @@ python api.py                  # 手动起服务
 ```
 
 需要自己装 Python 3.10+。
+
+### 关于 npm
+
+包已经构建好并测试通过（`dist/dsh-tan`，`npm pack` 生成 87.9 kB 的 tgz），但**暂未发布到 npm 官方仓库**。
+
+如果你有 npm 账号想自己发布：
+
+```bash
+python build_npm.py                    # 构建
+cd dist/dsh-tan
+node scripts/fetch-python.cjs          # 下载内置 Python
+npm publish                            # 发布
+```
+
+发布后 `npm install dsh-tan` 就能用，`postinstall` 会自动下载 Python 并注册到 DSH。
 
 ---
 
