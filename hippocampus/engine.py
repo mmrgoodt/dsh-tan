@@ -38,6 +38,10 @@ class Hippocampus:
 
         # ② 记忆块
         mem_text, used, tokens = self.retriever.build_context(query)
+        if not mem_text:
+            # 「你好」「在吗」这类短问候召回为空时，给最近的几条，
+            # 否则模型看到的是「我什么都不记得」
+            mem_text, used, tokens = self.retriever.build_recent(limit=3)
         if mem_text:
             parts.append("## 我记得的事\n" + mem_text)
 

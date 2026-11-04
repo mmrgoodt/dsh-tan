@@ -300,6 +300,47 @@ class Retriever:
         return picked
 
     # ---------- 预算注入 ----------
+    def build_recent(self, limit=3, budget=None):
+        """查询没命中时用：取最近 + 最常被用到的几条
+
+        为什么需要：用户说「你好」「在吗」这种短问候，
+        tokenize 出来的词在记忆里不存在，召回 0 条 ->
+        模型看到的是「我什么都不记得」，体验很差。
+        """
+        try:
+            rows = self.db.query(
+                """
+                SELECT * FROM memories
+                WHERE status = 'active'
+                  AND (sensitivity IS NULL OR sensitivity != 'secret')
+                ORDER BY pinned DESC, recall_count DESC, created DESC
+                LIMIT ?
+                """,
+                (limit,),
+            )
+        except Exception:
+            return "", [], 0
+
+        if not rows:
+            return "", [], 0
+
+        cfg_budget = budget or config.BUDGET
+        cap = cfg_budget if isinstance(cfg_budget, int) else 300
+        lines, used, total = [], [], 0
+        for r in rows:
+            m = dict(r)
+            text = (m.get("summary") or m.get("content") or "").strip()
+            if not text:
+                continue
+            line = "- " + text[:80]
+            n = len(line) // 2
+            if total + n > cap:
+                break
+            lines.append(line)
+            used.append(m)
+            total += n
+        return "\n".join(lines), used, total
+
     def build_context(self, query="", current_thread=None, budget=None):
         """返回 (文本, 使用的记忆列表, token 占用)"""
         budget = budget or dict(config.BUDGET)

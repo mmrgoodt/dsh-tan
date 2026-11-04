@@ -386,8 +386,21 @@ class Handler(BaseHTTPRequestHandler):
             return json_resp(self, {"ok": False, "error": "token 不对"}, 401)
 
         if path == "/context":
+            q = body.get("query") or ""
             with LOCK:
-                text, meta = H.prepare_context(body.get("query") or "")
+                text, meta = H.prepare_context(q)
+            # 调试日志：看不同工作区的请求都带了什么
+            try:
+                import time as _t
+                _line = "%s  q=%r  -> %d 条/%d tok" % (
+                    _t.strftime("%m-%d %H:%M:%S"), q[:40],
+                    meta.get("memories", 0), meta.get("tokens", 0))
+                if not text:
+                    _line += "  [空]"
+                with open(config.ROOT / "context.log", "a", encoding="utf-8") as f:
+                    f.write(_line + chr(10))
+            except Exception:
+                pass
             return json_resp(self, {"text": text, **meta})
         if path == "/turn":
             with LOCK:
