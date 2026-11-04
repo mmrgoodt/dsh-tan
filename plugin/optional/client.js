@@ -395,16 +395,20 @@ function ConfigCard() {
 		}
 	};
 
-	const startEdit = (m) => setEditing({ id: m.id, text: m.summary || m.content || "" });
+	// 编辑的必须是正文：列表显示优先用 summary，这里若也取 summary，
+	// 保存后 summary 没变，列表看上去就像「根本没保存」。
+	const startEdit = (m) => setEditing({ id: m.id, text: m.content || m.summary || "" });
 
 	const cancelEdit = () => setEditing(null);
 
 	const saveEdit = async () => {
 		if (!editing) return;
+		const id = editing.id;                       // 先抓住 id，后面会清空 editing
 		const t = (editing.text || "").trim();
 		if (!t) { flash("内容不能为空", true); return; }
 		setEditing(null);
-		await act("/memory/edit", { id: editing.id, content: t }, "已保存修改");
+		// summary 一并刷新，否则列表仍显示旧摘要，用户以为没存上
+		await act("/memory/edit", { id, content: t, summary: t.slice(0, 60) }, "已保存修改");
 	};
 
 	const act = async (p, body, label) => {

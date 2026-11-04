@@ -1,5 +1,5 @@
 # -*- coding: utf-8 -*-
-"""Tan ⇄ DSH 安装器（v0.3.1）
+"""Tan ⇄ DSH 安装器（v0.3.2）
 
 用法：
     python install.py              # 只装宿主（最安全，默认）

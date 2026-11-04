@@ -25,6 +25,7 @@ const DEFAULT_ROOT = "D:\\dsh-tan";
 const MEMORY_ORDER = 9000;
 
 let apiProcess = null;
+let authWarned = false;
 
 /* ---------------- HTTP ---------------- */
 
@@ -34,10 +35,23 @@ async function callApi(base, path, body, timeoutMs = 1200) {
   try {
     const res = await fetch(base + path, {
       method: body === undefined ? "GET" : "POST",
-      headers: { "Content-Type": "application/json" },
+      // api.py 从 v0.2 起校验 token，唯一给插件留的免 token 通道是
+      // X-Tan-Source: dsh-plugin（见 api.py 的 _authorized 第 0 条）。
+      // 少这个 header，/context 和 /turn 全部 401，记忆会静默失效。
+      headers: {
+        "Content-Type": "application/json",
+        "X-Tan-Source": "dsh-plugin",
+      },
       body: body === undefined ? undefined : JSON.stringify(body),
       signal: ac.signal,
     });
+    if (res.status === 401) {
+      if (!authWarned) {
+        authWarned = true;
+        console.warn("[hippocampus] 记忆服务返回 401：插件鉴权未通过，记忆注入/写入被跳过");
+      }
+      return null;
+    }
     if (!res.ok) return null;
     return await res.json();
   } catch {
