@@ -12,7 +12,7 @@ rem ---------- 1. 找 Python（优先用内置的）----------
 set PY=
 if exist "%~dp0pluginendor\python\python.exe" (
     set PY="%~dp0pluginendor\python\python.exe"
-    echo [1/5] 用内置 Python
+    echo [1/3] 用内置 Python
     goto :found
 )
 
@@ -36,11 +36,11 @@ if not defined PY (
 %PY% -c "import sys; print('      版本:', sys.version.split()[0])"
 
 rem ---------- 2. 检查依赖（本项目只用标准库） ----------
-echo [2/5] 检查依赖
+echo [1/3] 检查依赖
 %PY% -c "import sqlite3, json, http.server, urllib.request; print('      标准库齐全，无需 pip install')"
 
 rem ---------- 3. 启动服务 ----------
-echo [3/5] 启动记忆服务
+echo [2/3] 启动记忆服务
 tasklist /fi "imagename eq pythonw.exe" 2>nul | find /i "pythonw" >nul
 if %errorlevel%==0 (
     echo      已有 pythonw 进程，跳过
@@ -56,12 +56,8 @@ if errorlevel 1 (
     exit /b 1
 )
 
-rem ---------- 4. 装开机自启 ----------
-echo [4/5] 加入开机启动
-%PY% "%~dp0watchdog.py" --install
-
 rem ---------- 5. 装进 DSH ----------
-echo [5/5] 装进 DSH 插件列表
+echo [4/4] 装进 DSH 插件列表
 %PY% "%~dp0install.py" --panel
 
 echo.

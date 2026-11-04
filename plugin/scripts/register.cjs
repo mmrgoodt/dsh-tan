@@ -8,7 +8,7 @@
  *   2. dsh.profile.bundles 数组里加 "dsh-tan"          DSH 真正加载
  *
  * 另外装一个开机自启（启动文件夹 + VBS），让 Python 服务跟着开机起来，
- * 由 watchdog.py 守着——挂了 30 秒内自动拉回来。
+ * 服务由 DSH 插件自己守着——挂了 60 秒内自动拉回来。
  *
  * 用法：
  *   node scripts/register.cjs              # 安装

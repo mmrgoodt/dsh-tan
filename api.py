@@ -64,7 +64,7 @@ AUTH_TOKEN = _load_token()
 
 # 不需要 token 的路径（看门狗探活、静态页面本身）
 PUBLIC_PATHS = {"/health", "/", "/console.html", "/index.html",
-                "/neuron.html", "/neuron3d.html", "/favicon.ico",
+                "/neuron3d.html", "/favicon.ico",
                 "/auth/login"}   # 登录接口本身要能访问，否则死锁
 
 
@@ -282,7 +282,7 @@ class Handler(BaseHTTPRequestHandler):
         if path in ("/", "/console", "/index.html"):
             return serve_static(self, "console.html")
 
-        # 其余静态文件（neuron3d.html / neuron.html / *.png / *.css / *.js）
+        # 其余静态文件（neuron3d.html / *.png / *.css / *.js）
         if path.startswith("/") and path.count("/") == 1:
             name = path[1:]
             if name and ("." in name) and not name.startswith("."):

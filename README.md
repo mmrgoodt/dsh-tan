@@ -133,9 +133,7 @@ python api.py --port 18766       # 换端口
 dsh-tan/
 ├── api.py                    HTTP 服务（127.0.0.1:18765）
 ├── install.py                装进 DSH
-├── watchdog.py               服务守护（可选，DSH 自己也会守）
 ├── proactive_notify.py       主动消息
-├── cli.py                    命令行
 ├── build_npm.py              打 npm 包
 │
 ├── hippocampus/              记忆引擎（13 个模块）
@@ -165,7 +163,6 @@ dsh-tan/
 │
 ├── visual/
 │   ├── console.html          网页控制台
-│   ├── neuron.html           2D 神经元
 │   └── neuron3d.html         3D 神经元
 │
 └── tests/                    107 个用例

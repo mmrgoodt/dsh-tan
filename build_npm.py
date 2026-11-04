@@ -38,7 +38,7 @@ DIST = ROOT / "dist"
 PKG = DIST / "dsh-tan"
 
 # 要搬进 python/ 的东西
-PY_FILES = ["api.py", "cli.py", "watchdog.py", "proactive_notify.py", "install.py"]
+PY_FILES = ["api.py", "proactive_notify.py", "install.py"]
 PY_DIRS = ["hippocampus", "visual"]
 
 SKIP_PATTERNS = ["__pycache__", ".pytest_cache", "*.pyc", "*.log", "*.db", "*.tanbak",
