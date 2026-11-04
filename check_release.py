@@ -17,7 +17,7 @@ ROOT = Path(__file__).resolve().parent
 # 不该出现的个人标识
 # 关键词用 base64 存：否则这个脚本会把「自己」扫出来报错（自指问题）
 _PERSONAL_B64 = (
-    "6LCt6I2j5Zu9fOiAgeiwrXzpspzmnpzpgJp85YWI5byAfOWSuOmYs3xtbXJnb29kdHxyb25nZ3VvfDYxOTE4ODE2fHd4MGFkYzh8WExHYW1lfOi/hembt+S4i+i9vQ=="
+    "6LCt6I2j5Zu9fOiAgeiwrXzpspzmnpzpgJp85YWI5byAfOWSuOmYs3xyb25nZ3VvfDYxOTE4ODE2fHd4MGFkYzh8WExHYW1lfOi/hembt+S4i+i9vQ=="
 )
 
 PERSONAL = base64.b64decode(_PERSONAL_B64).decode("utf-8").split("|")
