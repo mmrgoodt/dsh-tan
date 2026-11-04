@@ -111,9 +111,15 @@ function spawnPython(root, logger) {
 /* ---------------- 会话文本 ---------------- */
 
 function textOf(event) {
-  const msg = event?.data?.message;
-  if (!msg || !Array.isArray(msg.content)) return "";
-  return msg.content
+  const d = event?.data;
+  if (!d) return "";
+  // 两种事件体不一样：
+  //   user/message      → data.content
+  //   assistant/message → data.message.content
+  // 只读后者会让每一条用户消息都被读成空串（检索词恒为空、写入时 user 字段恒空）。
+  const content = Array.isArray(d.content) ? d.content : d.message?.content;
+  if (!Array.isArray(content)) return "";
+  return content
     .filter((c) => c?.type === "text" && typeof c.text === "string")
     .map((c) => c.text)
     .join("");
@@ -144,9 +150,12 @@ function extractTurn(events, turn) {
 /** 最近一条用户消息（作为检索 query） */
 function lastUserText(events) {
   for (let i = events.length - 1; i >= 0; i--) {
-    if (events[i].type !== "user/message") continue;
-    const txt = textOf(events[i]);
-    if (txt) return txt;
+    const ev = events[i];
+    if (ev.type !== "user/message") continue;
+    // time-context 是宿主塞的时间快照，不是用户说的话，不能拿来当检索词
+    if (ev.data?.source?.kind === "time-context") continue;
+    const txt = textOf(ev);
+    if (txt) return txt.slice(0, 200);
   }
   return "";
 }

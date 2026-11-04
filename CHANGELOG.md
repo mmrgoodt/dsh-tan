@@ -68,6 +68,25 @@ python install.py --panel
 
 只刷新页面不够——client bundle 只在启动时加载一次。
 
+### ④ 检索词恒为空：用户消息被读成空串
+
+`textOf` 只读了 `event.data.message.content`——那是 assistant 事件的形状；user 事件的正文在 `event.data.content`。于是：
+
+- `/context` 的 query 永远是空 → 每轮注入的是「最近最重要的 N 条」，而不是按你这句话检索
+- `/turn` 写入时 `user` 字段永远是空串 → 服务端只能拿 assistant 的回复去做提取
+
+`context.log` 里那些 `q=''` 就是这么来的。
+
+**修法**：两种事件形状都认；`lastUserText` 跳过宿主注入的 `time-context` 时间快照（否则检索词会变成「Time sampled while preparing turn…」），并截断到 200 字。
+
+实测（拿飞书那个 146 轮的会话重放）：
+
+```
+修复前  最后一条用户消息 → ""
+修复后  最后一条用户消息 → "这个跨会话不会跨工作区"
+        turn 146: user="这个跨会话不会跨工作区"  assistant="我先纠正自己的判断…"
+```
+
 ### 升级方式
 
 ```bash
