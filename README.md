@@ -1,5 +1,7 @@
 # Tan · 记忆插件
 
+`v0.3.1` · `MIT` · `Python 3.10+` · `Windows / macOS / Linux`
+
 > 给 AI 装一个会遗忘、会沉淀、有性格的记忆
 >
 > 全部本地运行 · 对话时零模型调用 · 每日成本约 0.05 元
@@ -36,7 +38,7 @@ npm install dsh-tan
 
 ### 方式二：压缩包（不需要 Node）
 
-1. 下载 Release 里的 zip，解压到任意目录（路径最好不带中文）
+1. 打开 [Releases](https://github.com/mmrgoodt/dsh-tan/releases)，下载最新的 `dsh-tan-v0.3.1.zip`，解压到任意目录（路径最好不带中文）
 2. 双击 `一键安装.bat`
 3. 按提示重启 DSH
 
@@ -45,7 +47,7 @@ npm install dsh-tan
 ### 方式三：源码
 
 ```bash
-git clone https://github.com/<你的名字>/dsh-tan.git
+git clone https://github.com/mmrgoodt/dsh-tan.git
 cd dsh-tan
 python install.py --panel      # 装插件（含设置页）
 python api.py                  # 手动起服务
