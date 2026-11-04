@@ -58,3 +58,6 @@ plugin/vendor/
 
 # npm 构建产物（build_npm.py 生成）
 dist/
+
+# Release 压缩包（本地打，通过 GitHub Release 附件分发，不进仓库）
+release/
