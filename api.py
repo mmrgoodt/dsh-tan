@@ -31,10 +31,13 @@ import json
 import os
 import re
 import secrets
+import shutil
+import subprocess
 import threading
 import time
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import urlparse, parse_qs
+from pathlib import Path
 
 from hippocampus import Hippocampus, config
 from hippocampus import backup as hip_backup
@@ -144,6 +147,29 @@ def save_config(patch):
     return applied
 
 
+WX_LOGIN_SCRIPT = str(Path(__file__).resolve().parent / "scripts" / "wx-login.mjs")
+
+
+def weixin_bridge(action):
+    """微信绑定走 node 桥，二维码的编码和出图都在 plugin/lib 里（自研）。"""
+    node = shutil.which("node") or "node"
+    try:
+        r = subprocess.run(
+            [node, WX_LOGIN_SCRIPT, str(action)],
+            capture_output=True, timeout=90, text=True, encoding="utf-8",
+        )
+    except Exception as e:
+        return {"ok": False, "error": "调用 node 失败: %s" % e}
+    for line in reversed((r.stdout or "").strip().splitlines()):
+        line = line.strip()
+        if line.startswith("{"):
+            try:
+                return json.loads(line)
+            except Exception:
+                break
+    return {"ok": False, "error": (r.stderr or "node 没有输出")[-300:]}
+
+
 def json_resp(handler, obj, code=200):
     body = json.dumps(obj, ensure_ascii=False).encode("utf-8")
     handler.send_response(code)
@@ -182,12 +208,20 @@ MIME = {
 
 
 def serve_static(handler, name):
-    """从 visual/ 目录发静态文件（只允许扁平文件名，防目录穿越）。"""
-    safe = os.path.basename(name)
-    f = os.path.join(HERE, "visual", safe)
+    """从 visual/ 目录发静态文件。
+
+    默认只认扁平文件名；唯一例外是 vendor/ 下的多级路径（three.js 这类本地依赖，
+    页面要按 ./vendor/three/jsm/... 引用）。逐段白名单校验，挡掉 .. 和怪字符。
+    """
+    rel = str(name or "").replace("\\", "/").strip("/")
+    parts = [p for p in rel.split("/") if p]
+    safe = all(p not in (".", "..") and re.fullmatch(r"[A-Za-z0-9._-]+", p) for p in parts)
+    if not parts or not safe or (len(parts) > 1 and (parts[0] != "vendor" or len(parts) > 6)):
+        return json_resp(handler, {"error": "not found", "path": rel}, 404)
+    f = os.path.join(HERE, "visual", *parts)
     if not os.path.isfile(f):
-        return json_resp(handler, {"error": "not found", "path": safe}, 404)
-    ext = os.path.splitext(safe)[1].lower()
+        return json_resp(handler, {"error": "not found", "path": rel}, 404)
+    ext = os.path.splitext(parts[-1])[1].lower()
     ctype = MIME.get(ext, "application/octet-stream")
     try:
         with open(f, "rb") as fh:
@@ -286,6 +320,9 @@ class Handler(BaseHTTPRequestHandler):
                 return True
             if p.path.startswith("/.well-known"):
                 return True
+            # 3D 页面的本地依赖（three.js / jsm）走公开静态资源，浏览器加载时带不了 token
+            if p.path.startswith("/vendor/"):
+                return True
 
             # 0) DSH 面板专用 header（面板在桌面应用里，算可信环境）
             if (self.headers.get("X-Tan-Source") or "") == "dsh-plugin":
@@ -369,10 +406,19 @@ class Handler(BaseHTTPRequestHandler):
             return serve_static(self, "console.html")
 
         # 其余静态文件（neuron3d.html / *.png / *.css / *.js）
-        if path.startswith("/") and path.count("/") == 1:
+        # vendor/ 下允许两级以上路径，3D 页面要按 ./vendor/three/jsm/... 引本地依赖
+        if path.startswith("/") and not path.startswith("//"):
             name = path[1:]
-            if name and ("." in name) and not name.startswith("."):
+            if name and ("." in name) and not name.startswith(".") and (
+                path.count("/") == 1 or name.startswith("vendor/")
+            ):
                 return serve_static(self, name)
+
+        # ---- 微信绑定（扫码）----
+        if path == "/weixin/status":
+            return json_resp(self, weixin_bridge("status"))
+        if path == "/weixin/qr":
+            return json_resp(self, weixin_bridge(qs.get("action", ["start"])[0]))
 
         if path == "/health":
             return json_resp(self, {"ok": True, "version": "0.2", "db": str(config.DB_PATH)})

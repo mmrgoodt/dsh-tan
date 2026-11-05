@@ -4,6 +4,7 @@ import json
 import time
 
 from . import config
+from . import distill as distill_mod
 from . import extractor
 from .db import new_id, now
 from .extractor import clip_content
@@ -19,7 +20,8 @@ class Writer:
 
         ts: 这一轮的真实时间（回补历史时用，缺省就取当前时间）
         """
-        out = {"memories": [], "loops": [], "thread": None, "noise": 0}
+        out = {"memories": [], "loops": [], "thread": None, "noise": 0,
+               "distill": {"dropped": [], "kinds": {}}, "superseded": []}
 
         # 1) 用户侧
         if user_text:
@@ -27,6 +29,8 @@ class Writer:
             out["memories"] += r["memories"]
             out["loops"] += r["loops"]
             out["noise"] += r["noise"]
+            out["superseded"] += r.get("superseded") or []
+            self._merge_distill(out, r)
             if r.get("thread"):
                 out["thread"] = r["thread"]
 
@@ -35,10 +39,30 @@ class Writer:
             r = self._ingest_one(assistant_text, "assistant", session, turn, context_note, ts)
             out["memories"] += r["memories"]
             out["loops"] += r["loops"]
+            out["superseded"] += r.get("superseded") or []
+            self._merge_distill(out, r)
 
         return out
 
+    @staticmethod
+    def _merge_distill(out, r):
+        """把单侧的提炼统计并进整轮结果（调试/自测看这里）"""
+        d = r.get("distill") or {}
+        out["distill"]["dropped"] += d.get("dropped") or []
+        for k, v in (d.get("kinds") or {}).items():
+            out["distill"]["kinds"][k] = out["distill"]["kinds"].get(k, 0) + v
+
     def _ingest_one(self, text, role, session, turn, context_note, ts=None):
+        # 0) 提炼：一轮话里大半是过程叙述（「我修好了」「已经推送了」「做了四件事」），
+        # 先按规则压成「事实 / 偏好 / 教训」三类，再走后面的提取。
+        # 全被丢掉 = 这轮没有可记的东西：不建 Thread、不占预算、不留流水账。
+        d = distill_mod.distill(text, role)
+        distilled = {"dropped": d["dropped"], "kinds": d["kinds"]}
+        if not d["text"]:
+            return {"memories": [], "loops": [], "noise": 0, "thread": None,
+                    "distill": distilled, "superseded": []}
+        text = d["text"]
+
         info = extractor.extract(text, role)
         # 只留有价值的：有具体坐标，或者明确是决策/教训。
         # 不加这道闸，360 条里 256 条是流水账，抢的是真事的预算。
@@ -48,10 +72,12 @@ class Writer:
             # 「好的没问题」被判为噪音后走了 noise 分支，照样入库。
             if info.get("keep"):
                 if not should_keep(info.get("content") or text, info.get("layer")):
-                    return {"memories": [], "loops": [], "noise": 0, "thread": None}
+                    return {"memories": [], "loops": [], "noise": 0, "thread": None,
+                            "distill": distilled, "superseded": []}
         except Exception:
             pass
-        res = {"memories": [], "loops": [], "noise": 0, "thread": None}
+        res = {"memories": [], "loops": [], "noise": 0, "thread": None,
+               "distill": distilled, "superseded": []}
         if not info["keep"]:
             return res
 
@@ -123,6 +149,10 @@ class Writer:
         )
         res["memories"].append(mid)
 
+        # 冲突覆盖：同一主题的新结论进来，把旧的那条标 superseded，
+        # 不留两条互相打架的记录（路径 A、路径 B 同时 active 是最糟的状态）。
+        res["superseded"] = self._supersede(mid, info.get("content") or text, info["layer"], ts)
+
         # 新记忆立刻连边，否则图谱永远是今天的样子
         try:
             from . import graph as _graph
@@ -136,6 +166,53 @@ class Writer:
             res["loops"].append(lid)
 
         return res
+
+    def _supersede(self, new_id, text, layer, ts=None):
+        """冲突覆盖：新结论盖掉旧结论，旧的标 status='superseded'
+
+        判据（保守，判错了比不判更糟）：
+          · 主题词重合 ≥2，且重合占较少一侧的一半以上
+          · 新记忆 created 更晚（回补历史时按 ts 算）
+          · 旧记忆没被 pinned（人手动钉住的不许自动覆盖）
+          · 取值确实变了（路径/端口/版本/数字不同），或者同层态度反了
+
+        旧的只改 status + superseded_by，内容和召回次数都留着 —— 能翻案。
+        """
+        try:
+            # 只扫 active 且没 pinned 的：pinned 是「我说的算」，不参与自动覆盖
+            rows = self.db.query(
+                "SELECT id, content, summary, layer, created FROM memories "
+                "WHERE status='active' AND pinned=0 AND id!=?", (new_id,))
+        except Exception:
+            return []
+        if not rows:
+            return []
+
+        # 先用便宜的字面预筛：新记忆的主题词至少要有 2 个出现在旧正文里，
+        # 才值得去算完整的分词重合。471 条活跃记忆时这一步把 tokenize 的
+        # 调用次数从「每条一次」降到「几乎没有」，写一轮的开销保持在毫秒级。
+        new_tokens = distill_mod.topic_tokens(text)
+        if len(new_tokens) < 2:
+            return []
+        new_created = ts or time.time()
+        out = []
+        for r in rows:
+            old_created = r["created"] or 0
+            if old_created > new_created:
+                continue
+            old_text = (r["content"] or "") + " " + (r["summary"] or "")
+            low = old_text.lower()
+            if sum(1 for t in new_tokens if t in low) < 2:
+                continue
+            if not distill_mod.conflict(old_text, text,
+                                        old_layer=r["layer"], new_layer=layer):
+                continue
+            try:
+                self.db.update_memory(r["id"], status="superseded", superseded_by=new_id)
+            except Exception:
+                continue
+            out.append(r["id"])
+        return out[:5]
 
     # ---------- 显式记忆 ----------
     def remember(self, text, layer="L2", tags=None, entities=None, pinned=False, source="S1"):

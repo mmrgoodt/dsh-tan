@@ -16,10 +16,23 @@
 import { spawn } from "node:child_process";
 import { existsSync, readFileSync, writeFileSync } from "node:fs";
 import { registerMemoryTools } from "./memory-tools.js";
+import { registerNativeImTools } from "./im-native.js";
+import { startWxLoop, replyToWechat } from "./wx-loop.js";
 import { join } from "node:path";
 
 export const name = "hippocampus";
-export const inject = [];
+// dshIm 是 dsh-im 插件提供的服务。cordis 要先声明依赖才允许读 ctx.dshIm，
+// 否则抛 cannot get property "dshIm" without inject。
+//
+// 只能是数组，而且**必须把要用的服务全列上** —— inject 是独占的白名单：
+// 只写 ["dshIm"] 之后，连 ctx.tools 都变成
+// "cannot get property tools without inject"，工具一个都注册不上。
+//
+// 踩过的两个坑：
+//   { optional: ["dshIm"] } → cordis 把 optional 当服务名去等，
+//                              整个插件 pending，记忆注入一起停
+//   ["dshIm"]              → tools 被锁，memory_save 也挂了
+export const inject = ["tools", "dshIm", "typertGateway", "connection"];
 
 const DEFAULT_API = "http://127.0.0.1:18765";
 const DEFAULT_ROOT = "D:\\dsh-tan";
@@ -235,6 +248,108 @@ function drainPending(root) {
   }
 }
 
+/* ---------------- /turn 提交节流 ---------------- */
+
+/**
+ * 把 1.5 秒窗口内的多个 turn 合并成一次 /turn 提交。
+ *
+ * 起因：连发三条消息时 turn/end 会来三次，以前就打三次 /turn，
+ * 服务端跟着跑三遍切分/去重/写入。合并之后一次搞定，
+ * user / assistant 各自按顺序用空行拼起来，turn 取最后一次。
+ *
+ * 只用 setTimeout + 数组，不引入依赖。
+ */
+const TURN_WINDOW_MS = 1500;
+const TURN_MERGE_MAX = 5;
+
+/** 所有还活着的合并器：插件卸载时要统一 flush 残留 */
+const turnThrottles = new Set();
+
+export function createTurnThrottle(submit, opts = {}) {
+  const windowMs = Number.isFinite(opts.windowMs) ? opts.windowMs : TURN_WINDOW_MS;
+  const mergeMax = Number.isFinite(opts.mergeMax) ? opts.mergeMax : TURN_MERGE_MAX;
+
+  let queue = [];
+  let timer = null;
+
+  function stopTimer() {
+    if (timer !== null) {
+      clearTimeout(timer);
+      timer = null;
+    }
+  }
+
+  /** 立刻提交并清空缓冲；出任何错都只会少记一条，不影响对话 */
+  function flush() {
+    stopTimer();
+    if (queue.length === 0) return 0;
+    const batch = queue;
+    queue = [];
+    const last = batch[batch.length - 1];
+    // 按顺序拼接，空段落直接跳过，避免连出两个空行
+    const join = (key) => batch.map((x) => x[key]).filter(Boolean).join("\n\n");
+    try {
+      submit({
+        user: join("user"),
+        assistant: join("assistant"),
+        session: last.session,
+        turn: last.turn,
+        count: batch.length,
+      });
+    } catch {
+      // 提交失败只丢记忆，绝不能冒泡到对话
+    }
+    return batch.length;
+  }
+
+  /** 收一条；攒满 mergeMax 条立即 flush，否则等窗口结束 */
+  function push(item) {
+    if (!item) return;
+    queue.push({
+      user: item.user || "",
+      assistant: item.assistant || "",
+      session: item.session || "",
+      turn: typeof item.turn === "number" ? item.turn : 0,
+    });
+    if (queue.length >= mergeMax) {
+      flush();
+      return;
+    }
+    // 窗口从第一条进来开始算，后面进来的不重置计时
+    if (timer === null) {
+      timer = setTimeout(() => {
+        timer = null;
+        flush();
+      }, windowMs);
+    }
+  }
+
+  const handle = {
+    push,
+    flush,
+    get pending() {
+      return queue.length;
+    },
+    dispose() {
+      flush(); // 卸载前把攒着的先写完
+      turnThrottles.delete(handle);
+    },
+  };
+  turnThrottles.add(handle);
+  return handle;
+}
+
+/** 插件卸载 / agent 释放时，把还没到窗口的 turn 一起写掉 */
+export function flushAllTurnThrottles() {
+  for (const t of Array.from(turnThrottles)) {
+    try {
+      t.flush();
+    } catch {
+      // 同上：吞掉
+    }
+  }
+}
+
 /* ---------------- 插件主体 ---------------- */
 
 export function apply(ctx, config = {}) {
@@ -280,6 +395,9 @@ export function apply(ctx, config = {}) {
 
   ctx.effect(() => () => clearInterval(guard), "hippocampus: health guard");
 
+  // 插件卸载时把所有 agent 攒着的 turn 一起写掉，别丢最后几条
+  ctx.effect(() => () => flushAllTurnThrottles(), "hippocampus: turn throttle flush");
+
   // ①·5 让模型自己管记忆：register memory_save / memory_search
   // 注册失败只影响工具，不影响注入，所以整段包在 try 里
   try {
@@ -287,6 +405,25 @@ export function apply(ctx, config = {}) {
     if (typeof disposeTools === "function") ctx.effect?.(() => disposeTools, "hippocampus: memory tools");
   } catch (e) {
     logger?.warn?.(`dsh-tan: memory tools 未注册（${e}）`);
+  }
+
+  // ①·6 主动发消息：走 tan 自己的原生微信通道（im-native.js）
+  //     不再依赖 dsh-im —— 那条路上消息能发出去，但 DSH 主程序会把 prompt
+  //     内容当数组校验，回 "content.some is not a function"，返回值不可信。
+  try {
+    const disposeIm = registerNativeImTools(ctx);
+    if (typeof disposeIm === "function") ctx.effect?.(() => disposeIm, "hippocampus: native im tools");
+  } catch (e) {
+    logger?.warn?.(`dsh-tan: 原生 im 工具未注册（${e}）`);
+  }
+
+  // ①·7 微信自动回：轮询新机器人 → 提交给会话 → 回合结束把回复发回去
+  try {
+    const stopLoop = startWxLoop(ctx, { logger });
+    if (typeof stopLoop === "function") ctx.effect?.(() => stopLoop, "hippocampus: wx loop");
+    logger?.info?.("dsh-tan: 微信自动回循环已就绪");
+  } catch (e) {
+    logger?.warn?.(`dsh-tan: 微信自动回未启动（${e}）`);
   }
 
   // ② 每个 agent 一建好就挂上本插件的事件（agent.ctx 随 agent 释放自动解绑）
@@ -299,6 +436,10 @@ export function apply(ctx, config = {}) {
       if (!agent.__tanTools) {
         agent.__tanTools = true;
         registerMemoryTools(agent.ctx, base);
+        // im_send 也必须在 agent 级注册 —— 根 ctx 上注册的工具不落到 agent，
+        // 跟 memory_save 踩的是同一个坑。第一次只写在根 ctx，重启后完全没生效。
+        // 原生通道只读配置文件，不需要从根 ctx 取服务，所以只传 agent.ctx。
+        registerNativeImTools(agent.ctx);
       }
     } catch (e) {
       logger?.warn?.(`dsh-tan: agent 级工具注册失败 ${e}`);
@@ -350,7 +491,27 @@ export function apply(ctx, config = {}) {
       }
     });
 
-    // 对话后：写入这一轮
+    // 对话后：写入这一轮。
+    // 每个 agent 一个合并器：不同会话的 turn 绝不能混进同一次提交里
+    // （否则 session / turn 会被别的东西覆盖）。
+    const turnThrottle = createTurnThrottle((batch) => {
+      void callApi(
+        base,
+        "/turn",
+        {
+          user: batch.user,
+          assistant: batch.assistant,
+          // session 取提交那一刻的当前 session.id，turn 取最后一条
+          session: agent.session?.id ?? batch.session,
+          turn: batch.turn,
+        },
+        8000
+      );
+    });
+
+    // agent 释放时把还没到窗口的 turn 写掉
+    agent.ctx.effect?.(() => () => turnThrottle.dispose(), "hippocampus: turn throttle");
+
     agent.ctx.on("session/event", (session, event) => {
       try {
         if (event?.type !== "turn/end") return;
@@ -362,12 +523,19 @@ export function apply(ctx, config = {}) {
         const { user, assistant } = extractTurn(events, turn);
         if (!user && !assistant) return;
 
-        void callApi(
-          base,
-          "/turn",
-          { user, assistant, session: agent.session?.id ?? "", turn },
-          8000
-        );
+        // 不在这里直接 POST，交给节流合并器（1.5 秒窗口 / 攒满 5 条即发）
+        turnThrottle.push({
+          user,
+          assistant,
+          session: agent.session?.id ?? "",
+          turn,
+        });
+
+        // 这一轮如果是微信来的，把回复发回微信（每条都要回，不参与合并）
+        const sid = agent.session?.id;
+        if (sid && assistant) {
+          void replyToWechat(sid, assistant).catch(() => {});
+        }
       } catch {
         // 记忆写入失败不能影响对话
       }

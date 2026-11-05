@@ -53,6 +53,9 @@ watchdog.log
 wd_test.log
 token.txt
 
+# 运行时状态（微信登录二维码等，随时会变）
+state/
+
 # 内置 Python（npm install 时自动下载，不进仓库）
 plugin/vendor/
 

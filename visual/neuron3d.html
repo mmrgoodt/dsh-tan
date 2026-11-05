@@ -16,13 +16,22 @@
     backdrop-filter:blur(8px); -webkit-backdrop-filter:blur(8px);
     box-shadow:0 10px 34px rgba(0,0,0,.55); user-select:none; pointer-events:none; }
 
-  #hud { left:16px; top:16px; min-width:200px; }
+  #hud { left:16px; top:16px; min-width:214px; }
   #hud h1 { font-size:14px; font-weight:600; color:#58a6ff; letter-spacing:.6px; margin-bottom:8px; }
   #hud .row { display:flex; justify-content:space-between; font-size:11.5px; color:#8b949e; margin:4px 0; }
   #hud .row b { color:#e6edf3; font-weight:600; }
   #dot { display:inline-block; width:7px; height:7px; border-radius:50%; background:#8b949e;
     box-shadow:0 0 8px currentColor; margin-right:6px; transition:.25s; }
   #dot.on { background:#3fb950; color:#3fb950; }
+  #dot.demo { background:#d29922; color:#d29922; }
+
+  /* 分层统计条 */
+  #layers { margin-top:9px; padding-top:8px; border-top:1px solid rgba(48,54,61,.6); }
+  #layers .lay { display:grid; grid-template-columns:44px 1fr 26px; align-items:center;
+    gap:7px; font-size:10.5px; color:#8b949e; margin:3px 0; }
+  #layers .lay .bar { height:4px; border-radius:2px; background:#161b22; overflow:hidden; }
+  #layers .lay .bar > i { display:block; height:100%; border-radius:2px; opacity:.85; }
+  #layers .lay .ct { text-align:right; color:#c9d1d9; font-variant-numeric:tabular-nums; }
 
   #legend { right:16px; bottom:16px; font-size:11px; color:#8b949e; }
   #legend .l { display:flex; align-items:center; gap:8px; margin:5px 0; }
@@ -30,18 +39,25 @@
 
   #help { left:50%; bottom:16px; transform:translateX(-50%); font-size:11px; color:#6e7681;
     background:rgba(10,14,20,.6); padding:7px 16px; border-radius:20px;
-    border:1px solid rgba(48,54,61,.5); }
+    border:1px solid rgba(48,54,61,.5); white-space:nowrap; }
   #help kbd { background:#161b22; border:1px solid #30363d; border-radius:4px; padding:1px 5px;
     font-size:10px; color:#8b949e; font-family:inherit; }
 
   #tip { position:fixed; z-index:20; display:none; pointer-events:none;
     background:rgba(13,17,23,.96); border:1px solid #30363d; border-radius:8px;
-    padding:9px 12px; font-size:11.5px; line-height:1.65; max-width:300px;
+    padding:9px 12px; font-size:11.5px; line-height:1.65; max-width:320px;
     box-shadow:0 8px 30px rgba(0,0,0,.6); }
-  #tip .t { color:#e6edf3; margin-bottom:5px; font-weight:600; }
+  #tip .t { color:#e6edf3; margin-bottom:5px; font-weight:600; line-height:1.5; }
   #tip .m { color:#8b949e; }
   #tip .bar { height:3px; border-radius:2px; margin-top:6px; background:#21262d; overflow:hidden; }
   #tip .bar > i { display:block; height:100%; border-radius:2px; }
+
+  /* 聚焦节点的浮动标签（只画一个，不占性能） */
+  #focusLabel { position:fixed; z-index:15; display:none; pointer-events:none;
+    transform:translate(-50%,-100%); max-width:280px; padding:3px 9px; border-radius:6px;
+    font-size:11.5px; color:#e6edf3; background:rgba(8,12,18,.82);
+    border:1px solid rgba(88,166,255,.45); box-shadow:0 0 18px rgba(88,166,255,.18);
+    white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }
 
   #err { position:fixed; inset:0; display:none; align-items:center; justify-content:center;
     flex-direction:column; gap:14px; font-size:14px; color:#f85149; text-align:center; z-index:30; }
@@ -57,7 +73,10 @@
   <div class="row"><span>节点</span><b id="nCount">0</b></div>
   <div class="row"><span>突触</span><b id="eCount">0</b></div>
   <div class="row"><span>记忆条数</span><b id="mCount">0</b></div>
+  <div class="row"><span>线程</span><b id="tCount">0</b></div>
+  <div class="row"><span>挂起</span><b id="lCount">0</b></div>
   <div class="row"><span>更新</span><b id="clock">--:--:--</b></div>
+  <div id="layers"></div>
 </div>
 
 <div id="legend" class="panel">
@@ -69,479 +88,1160 @@
 </div>
 
 <div id="help" class="panel">
-  <kbd>拖动</kbd> 旋转 · <kbd>滚轮</kbd> 缩放 · <kbd>双击</kbd> 复位 · <kbd>空格</kbd> 暂停旋转
+  <kbd>拖动</kbd> 旋转 · <kbd>滚轮</kbd> 缩放 · <kbd>点节点</kbd> 飞过去 · <kbd>双击</kbd> 复位 · <kbd>空格</kbd> 暂停自转
 </div>
 
 <div id="tip"></div>
+<div id="focusLabel"></div>
 
 <div id="err">
-  <div>记忆服务未启动</div>
-  <div><code>python api.py</code></div>
+  <div>这个浏览器没有可用的 WebGL</div>
+  <div><code>换个 Chrome / Edge 再打开 http://127.0.0.1:18765/neuron3d.html</code></div>
 </div>
 
-<script>
-"use strict";
+<script type="importmap">
+{"imports":{"three":"./vendor/three/three.module.js"}}
+</script>
+
+<script type="module">
+import * as THREE from "three";
+import { EffectComposer } from "./vendor/three/jsm/postprocessing/EffectComposer.js";
+import { RenderPass } from "./vendor/three/jsm/postprocessing/RenderPass.js";
+import { UnrealBloomPass } from "./vendor/three/jsm/postprocessing/UnrealBloomPass.js";
+import { OutputPass } from "./vendor/three/jsm/postprocessing/OutputPass.js";
 
 /* ============================================================
    配置
    ============================================================ */
 const API = "http://127.0.0.1:18765";
+const MAX_NODES = 1200;      // 点的硬上限（验收要求 ≤1200）
+const MAX_EDGES = 3000;      // 边的硬上限（验收要求 ≤3000）
+const CURVE_SEGS = 10;       // 每条弧线的采样段数
+const PARTICLE_MAX = 720;    // 沿链路流动的粒子数上限
+const REFRESH_MS = 5000;
+
 const COLORS = { L4:"#f5c850", L5:"#f5c850", L3:"#48c774", L2:"#58a6ff", "L2-":"#f85149", L1:"#d29922" };
 const LABELS = { L4:"身份", L5:"自我", L3:"方法", L2:"事实", "L2-":"教训", L1:"情景" };
+const LAYER_ORDER = ["L4","L5","L3","L2","L2-","L1"];
 
-const CFG = {
-  repulse: 26000,      // 3D 斥力系数
-  spring: 0.020,
-  springLen: 105,
-  damping: 0.86,
-  centerPull: 0.0052,
-  maxSpeed: 6,
-  fov: 900,            // 透视焦距
-  minZoom: 0.25,
-  maxZoom: 3.2,
-  autoRotate: 0.0016,  // 每帧弧度
-  refreshMs: 5000,
+// 壳层半径系数：身份/自我在内核，方法一圈，事实一圈，情景最外圈
+const SHELL_R = { L4:0.10, L5:0.10, L3:0.40, L2:0.68, "L2-":0.745, L1:0.96 };
+const SCENE_R = 300;
+const FOV = 50;
+const FOV_TAN = Math.tan(FOV * Math.PI / 360);
+
+const EDGE_STYLE = {
+  thread: { color: new THREE.Color(0x58a6ff), alpha: 0.46 },
+  entity: { color: new THREE.Color(0x9ecbff), alpha: 0.26 },
+  link:   { color: new THREE.Color(0x8b949e), alpha: 0.16 },
 };
 
 /* ============================================================
-   画布
+   小工具
    ============================================================ */
-const cvs = document.getElementById("stage");
-const ctx = cvs.getContext("2d", { alpha: false });
-let W = 0, H = 0, DPR = Math.min(window.devicePixelRatio || 1, 2);
+const clamp = (v, a, b) => (v < a ? a : (v > b ? b : v));
+const lerp = (a, b, t) => a + (b - a) * t;
 
-function resize() {
-  W = window.innerWidth; H = window.innerHeight;
-  cvs.width = Math.round(W * DPR); cvs.height = Math.round(H * DPR);
-  cvs.style.width = W + "px"; cvs.style.height = H + "px";
-  ctx.setTransform(DPR, 0, 0, DPR, 0, 0);
+// FNV-1a：布局要确定性，同一 thread 每次都落同一片天区
+function hash01(str) {
+  let h = 2166136261 >>> 0;
+  const s = String(str);
+  for (let i = 0; i < s.length; i++) {
+    h ^= s.charCodeAt(i);
+    h = Math.imul(h, 16777619) >>> 0;
+  }
+  return ((h >>> 8) & 0xffffff) / 16777216;
 }
-window.addEventListener("resize", resize);
-resize();
-
-/* ============================================================
-   数据
-   ============================================================ */
-let nodes = [];          // {id,layer,label,weight,r, x,y,z, vx,vy,vz, alpha, isNew}
-let edges = [];          // {a,b,type}
-let stats = { memories: 0 };
-
-let cam = { rx: -0.18, ry: 0.35, zoom: 1, panX: 0, panY: 0 };
-let autoSpin = true;
-let hoverNode = null;
-let dragMode = null;     // "rotate" | "pan"
-let last = { x: 0, y: 0 };
-let mouse = { x: -999, y: -999 };
-
-/* ============================================================
-   拉数据
-   ============================================================ */
-async function load() {
-  try {
-    const g = await fetchJson("/graph");
-    applyGraph(g);
-    const s = await fetchJson("/status");
-    if (s) stats = s;
-    setState(true);
-  } catch {
-    setState(false);
-  }
-  document.getElementById("clock").textContent =
-    new Date().toLocaleTimeString("zh-CN", { hour12: false });
-}
-
-async function fetchJson(path) {
-  const ac = new AbortController();
-  const t = setTimeout(() => ac.abort(), 3000);
-  try {
-    const r = await fetch(API + path, { signal: ac.signal, cache: "no-store", headers: { "X-Tan-Source": "dsh-plugin" } });
-    if (!r.ok) throw new Error("bad");
-    return await r.json();
-  } finally {
-    clearTimeout(t);
-  }
-}
-
-function setState(ok) {
-  document.getElementById("state").textContent = ok ? "已连接" : "未连接";
-  document.getElementById("dot").className = ok ? "on" : "";
-  document.getElementById("err").style.display = ok ? "none" : "flex";
-}
-
-function applyGraph(data) {
-  const old = new Map(nodes.map(n => [n.id, n]));
-  const next = [];
-
-  for (const raw of (data.nodes || [])) {
-    const prev = old.get(raw.id);
-    const r = 5.5 + Math.min(14, (raw.weight || 0) * 2.8);
-
-    if (prev) {
-      next.push(Object.assign(prev, raw, { r, layer: raw.layer }));
-    } else {
-      // 新节点：球面随机出生
-      const theta = Math.random() * Math.PI * 2;
-      const phi = Math.acos(2 * Math.random() - 1);
-      const rad = 90 + Math.random() * 130;
-      next.push(Object.assign({}, raw, {
-        r, x: Math.sin(phi) * Math.cos(theta) * rad,
-        y: Math.sin(phi) * Math.sin(theta) * rad,
-        z: Math.cos(phi) * rad,
-        vx: 0, vy: 0, vz: 0, alpha: 0, isNew: true,
-      }));
-    }
-  }
-  nodes = next;
-
-  const idx = new Map(nodes.map(n => [n.id, n]));
-  edges = [];
-  const seen = new Set();
-  for (const e of (data.edges || [])) {
-    const a = idx.get(e.source_id || e.source);
-    const b = idx.get(e.target_id || e.target);
-    if (!a || !b || a === b) continue;
-    const key = a.id < b.id ? a.id + "|" + b.id : b.id + "|" + a.id;
-    if (seen.has(key)) continue;
-    seen.add(key);
-    edges.push({ a, b, type: e.edge_type || e.type || "link" });
-  }
-
-  document.getElementById("nCount").textContent = nodes.length;
-  document.getElementById("eCount").textContent = edges.length;
-  document.getElementById("mCount").textContent = stats.memories || nodes.length;
-}
-
-/* ============================================================
-   3D 物理
-   ============================================================ */
-function physics() {
-  const n = nodes.length;
-  if (!n) return;
-
-  // 斥力（3D）
-  for (let i = 0; i < n; i++) {
-    const a = nodes[i];
-    for (let j = i + 1; j < n; j++) {
-      const b = nodes[j];
-      let dx = a.x - b.x, dy = a.y - b.y, dz = a.z - b.z;
-      let d2 = dx * dx + dy * dy + dz * dz;
-      if (d2 < 1) { dx = Math.random() - .5; dy = Math.random() - .5; dz = Math.random() - .5; d2 = 1; }
-      const d = Math.sqrt(d2);
-      const f = Math.min(60, CFG.repulse / d2) / d;
-      a.vx += dx * f; a.vy += dy * f; a.vz += dz * f;
-      b.vx -= dx * f; b.vy -= dy * f; b.vz -= dz * f;
-    }
-  }
-
-  // 弹簧（3D）
-  for (const e of edges) {
-    const dx = e.b.x - e.a.x, dy = e.b.y - e.a.y, dz = e.b.z - e.a.z;
-    const d = Math.sqrt(dx * dx + dy * dy + dz * dz) || 1;
-    const f = (d - CFG.springLen) * CFG.spring;
-    const ux = dx / d, uy = dy / d, uz = dz / d;
-    e.a.vx += ux * f; e.a.vy += uy * f; e.a.vz += uz * f;
-    e.b.vx -= ux * f; e.b.vy -= uy * f; e.b.vz -= uz * f;
-  }
-
-  // 向心 + 阻尼 + 积分
-  for (const nd of nodes) {
-    nd.vx -= nd.x * CFG.centerPull;
-    nd.vy -= nd.y * CFG.centerPull;
-    nd.vz -= nd.z * CFG.centerPull;
-
-    nd.vx *= CFG.damping; nd.vy *= CFG.damping; nd.vz *= CFG.damping;
-
-    const sp = Math.hypot(nd.vx, nd.vy, nd.vz);
-    if (sp > CFG.maxSpeed) {
-      const k = CFG.maxSpeed / sp;
-      nd.vx *= k; nd.vy *= k; nd.vz *= k;
-    }
-    nd.x += nd.vx; nd.y += nd.vy; nd.z += nd.vz;
-
-    if (nd.isNew) {
-      nd.alpha = Math.min(1, (nd.alpha || 0) + 0.035);
-      if (nd.alpha >= 1) delete nd.isNew;
-    } else {
-      nd.alpha = Math.min(1, (nd.alpha || 0) + 0.07);
-    }
-  }
-}
-
-/* ============================================================
-   相机 / 投影
-   ============================================================ */
-function project(x, y, z) {
-  // 先绕 Y 轴（水平旋转），再绕 X 轴（俯仰）
-  const cy = Math.cos(cam.ry), sy = Math.sin(cam.ry);
-  let x1 = x * cy + z * sy;
-  let z1 = -x * sy + z * cy;
-
-  const cx = Math.cos(cam.rx), sx = Math.sin(cam.rx);
-  let y1 = y * cx - z1 * sx;
-  let z2 = y * sx + z1 * cx;
-
-  const depth = z2 + 900;                    // 相机距离
-  if (depth <= 60) return null;              // 太近，裁掉
-
-  const scale = (CFG.fov / depth) * cam.zoom;
-  return {
-    sx: W / 2 + x1 * scale + cam.panX,
-    sy: H / 2 + y1 * scale + cam.panY,
-    scale,
-    depth,
-    z: z2,
-  };
-}
-
-/* ============================================================
-   渲染
-   ============================================================ */
-function hexToRgb(hex) {
-  const v = parseInt(hex.slice(1), 16);
-  return [(v >> 16) & 255, (v >> 8) & 255, v & 255];
-}
-
-function draw() {
-  // 背景
-  ctx.fillStyle = "#05070b";
-  ctx.fillRect(0, 0, W, H);
-
-  const g = ctx.createRadialGradient(W / 2, H / 2, 40, W / 2, H / 2, Math.max(W, H) * .62);
-  g.addColorStop(0, "rgba(30,52,88,0.30)");
-  g.addColorStop(.55, "rgba(16,26,44,0.12)");
-  g.addColorStop(1, "rgba(5,7,11,0)");
-  ctx.fillStyle = g;
-  ctx.fillRect(0, 0, W, H);
-
-  // 投影所有节点
-  const proj = [];
-  for (const nd of nodes) {
-    const p = project(nd.x, nd.y, nd.z);
-    if (!p) continue;
-    proj.push({ nd, p });
-  }
-  // 远 → 近
-  proj.sort((a, b) => b.p.depth - a.p.depth);
-
-  const map = new Map(proj.map(o => [o.nd.id, o]));
-
-  // 连线
-  ctx.lineCap = "round";
-  for (const e of edges) {
-    const A = map.get(e.a.id), B = map.get(e.b.id);
-    if (!A || !B) continue;
-
-    const avgDepth = (A.p.depth + B.p.depth) / 2;
-    const fog = Math.max(0.05, Math.min(1, 900 / avgDepth));
-    const isThread = e.type === "thread";
-    const isEntity = e.type === "entity";
-
-    const baseA = isThread ? 0.30 : (isEntity ? 0.22 : 0.14);
-    const alpha = baseA * fog * Math.min(A.nd.alpha, B.nd.alpha);
-    const lw = Math.max(0.35, 1.4 * fog * ((A.p.scale + B.p.scale) / 2) * 1.6);
-
-    // 渐变连线
-    const grad = ctx.createLinearGradient(A.p.sx, A.p.sy, B.p.sx, B.p.sy);
-    const ca = isThread ? "88,166,255" : (isEntity ? "140,180,255" : "139,148,158");
-    grad.addColorStop(0, `rgba(${ca},${alpha})`);
-    grad.addColorStop(1, `rgba(${ca},${alpha * 0.55})`);
-
-    ctx.strokeStyle = grad;
-    ctx.lineWidth = lw;
-    ctx.beginPath();
-    ctx.moveTo(A.p.sx, A.p.sy);
-    ctx.lineTo(B.p.sx, B.p.sy);
-    ctx.stroke();
-  }
-
-  // 节点（远 → 近）
-  for (const { nd, p } of proj) {
-    const base = COLORS[nd.layer] || "#8b949e";
-    const [r, g2, b] = hexToRgb(base);
-    const fog = Math.max(0.15, Math.min(1, 850 / p.depth));
-    const a = (nd.alpha || 0) * fog;
-    const radius = Math.max(1.2, nd.r * p.scale * 1.15);
-
-    const heat = Math.min(1, (nd.weight || 0) / 8);
-    const glowK = 1 + heat * 0.85;
-
-    // 外层光晕
-    for (const [mult, alpha] of [[4.2, 0.035], [2.8, 0.06], [1.9, 0.11], [1.35, 0.19]]) {
-      ctx.beginPath();
-      ctx.arc(p.sx, p.sy, radius * mult * glowK, 0, Math.PI * 2);
-      ctx.fillStyle = `rgba(${r},${g2},${b},${alpha * a})`;
-      ctx.fill();
-    }
-
-    // 核心
-    const core = ctx.createRadialGradient(
-      p.sx - radius * .3, p.sy - radius * .3, radius * .1,
-      p.sx, p.sy, radius
-    );
-    core.addColorStop(0, `rgba(255,255,255,${0.92 * a})`);
-    core.addColorStop(.35, `rgba(${r},${g2},${b},${0.95 * a})`);
-    core.addColorStop(1, `rgba(${Math.max(0, r - 60)},${Math.max(0, g2 - 60)},${Math.max(0, b - 60)},${0.85 * a})`);
-    ctx.beginPath();
-    ctx.arc(p.sx, p.sy, radius, 0, Math.PI * 2);
-    ctx.fillStyle = core;
-    ctx.fill();
-
-    // 悬停高亮
-    if (hoverNode && hoverNode.id === nd.id) {
-      ctx.beginPath();
-      ctx.arc(p.sx, p.sy, radius * 1.9, 0, Math.PI * 2);
-      ctx.strokeStyle = `rgba(255,255,255,${0.55 * a})`;
-      ctx.lineWidth = 1.6;
-      ctx.stroke();
-    }
-
-    // 标签（近处才显示）
-    if (p.depth < 780 && radius > 3) {
-      const txt = (nd.label || "").slice(0, 13);
-      const fs = Math.max(9, Math.min(13, 10.5 * p.scale * 1.5));
-      ctx.font = `${fs}px "Microsoft YaHei UI", sans-serif`;
-      ctx.textAlign = "center";
-      ctx.textBaseline = "top";
-      const tw = ctx.measureText(txt).width;
-      const ty = p.sy + radius + 6;
-      const la = a * 0.92;
-
-      ctx.fillStyle = `rgba(6,10,16,${0.72 * la})`;
-      roundRect(p.sx - tw / 2 - 5, ty - 2, tw + 10, fs + 6, 4);
-      ctx.fill();
-
-      ctx.fillStyle = `rgba(226,233,240,${la})`;
-      ctx.fillText(txt, p.sx, ty);
-      ctx.textBaseline = "alphabetic";
-    }
-
-    nd._screen = { x: p.sx, y: p.sy, r: radius, a };
-  }
-}
-
-function roundRect(x, y, w, h, r) {
-  ctx.beginPath();
-  ctx.moveTo(x + r, y);
-  ctx.arcTo(x + w, y, x + w, y + h, r);
-  ctx.arcTo(x + w, y + h, x, y + h, r);
-  ctx.arcTo(x, y + h, x, y, r);
-  ctx.arcTo(x, y, x + w, y, r);
-  ctx.closePath();
-}
-
-/* ============================================================
-   主循环
-   ============================================================ */
-let lastT = performance.now();
-function frame(t) {
-  const dt = Math.min(50, t - lastT);
-  lastT = t;
-
-  if (autoSpin && !dragMode) {
-    cam.ry += CFG.autoRotate * (dt / 16.7);
-  }
-
-  physics();
-  draw();
-
-  requestAnimationFrame(frame);
-}
-
-/* ============================================================
-   交互
-   ============================================================ */
-function pickNode(mx, my) {
-  let best = null, bestD = 1e9;
-  for (const nd of nodes) {
-    if (!nd._screen) continue;
-    const d = Math.hypot(nd._screen.x - mx, nd._screen.y - my);
-    if (d < nd._screen.r + 12 && d < bestD) { best = nd; bestD = d; }
-  }
-  return best;
-}
-
-cvs.addEventListener("pointerdown", (e) => {
-  cvs.setPointerCapture(e.pointerId);
-  cvs.classList.add("drag");
-  const n = pickNode(e.clientX, e.clientY);
-  if (n) {
-    dragMode = "pan";
-  } else {
-    dragMode = "rotate";
-  }
-  last = { x: e.clientX, y: e.clientY };
-});
-
-cvs.addEventListener("pointermove", (e) => {
-  mouse = { x: e.clientX, y: e.clientY };
-
-  if (dragMode === "rotate") {
-    cam.ry += (e.clientX - last.x) * 0.006;
-    cam.rx += (e.clientY - last.y) * 0.005;
-    cam.rx = Math.max(-1.45, Math.min(1.45, cam.rx));
-    last = { x: e.clientX, y: e.clientY };
-    document.getElementById("tip").style.display = "none";
-    return;
-  }
-  if (dragMode === "pan") {
-    cam.panX += e.clientX - last.x;
-    cam.panY += e.clientY - last.y;
-    last = { x: e.clientX, y: e.clientY };
-    return;
-  }
-
-  // 悬停
-  const n = pickNode(e.clientX, e.clientY);
-  hoverNode = n;
-  const tip = document.getElementById("tip");
-  if (n) {
-    const color = COLORS[n.layer] || "#8b949e";
-    const pct = Math.min(100, (n.weight || 0) * 12);
-    tip.style.display = "block";
-    tip.style.left = Math.min(e.clientX + 18, W - 320) + "px";
-    tip.style.top = Math.min(e.clientY + 18, H - 140) + "px";
-    tip.innerHTML =
-      `<div class="t">${esc(n.label || "")}</div>` +
-      `<div class="m">${LABELS[n.layer] || n.layer} · ${n.age_days ?? "?"} 天前</div>` +
-      `<div class="m">被用到 ${n.weight || 0} 次</div>` +
-      `<div class="bar"><i style="width:${pct}%;background:${color}"></i></div>`;
-  } else {
-    tip.style.display = "none";
-  }
-});
-
-window.addEventListener("pointerup", () => {
-  dragMode = null;
-  cvs.classList.remove("drag");
-});
-
-cvs.addEventListener("wheel", (e) => {
-  e.preventDefault();
-  const k = e.deltaY < 0 ? 1.08 : 0.926;
-  cam.zoom = Math.max(CFG.minZoom, Math.min(CFG.maxZoom, cam.zoom * k));
-}, { passive: false });
-
-cvs.addEventListener("dblclick", () => {
-  cam.rx = -0.18; cam.ry = 0.35; cam.zoom = 1; cam.panX = 0; cam.panY = 0;
-});
-
-window.addEventListener("keydown", (e) => {
-  if (e.code === "Space") {
-    e.preventDefault();
-    autoSpin = !autoSpin;
-  }
-});
 
 function esc(s) {
   return String(s).replace(/[&<>"]/g, c => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" }[c]));
 }
 
 /* ============================================================
+   全局状态
+   ============================================================ */
+const state = {
+  nodes: [],            // {id,layer,label,weight,thread,age,color,size,pos}
+  edges: [],            // {a,b,type,ctrl}
+  adj: new Map(),       // id -> Set(id)
+  stats: {},
+  hovered: null,
+  selected: null,
+  demo: false,
+};
+
+let renderer = null, scene = null, camera = null, composer = null, bloomPass = null;
+let nodePoints = null, edgeLines = null, particlePoints = null;
+let nodeGeo = null, edgeGeo = null, particleGeo = null;
+let nodeAttr = null;            // {position, aColor, aSize, aOpacity}
+let nodeSizeBase = null;        // 每个点的基础尺寸（聚焦时放大用）
+let nodeAlphaTarget = null;     // 焦点调光后的目标透明度
+let nodeAppear = null;          // 出生淡入进度
+let edgeAlphaBase = null;       // 边的原始透明度
+let particleAlphaBase = null;
+let fadeActive = false;
+const particles = [];
+
+const tmpV = new THREE.Vector3();
+const tmpB = new THREE.Vector3();
+
+/* ============================================================
+   渲染器 / 场景 / 相机 / 后处理
+   ============================================================ */
+const canvas = document.getElementById("stage");
+
+function createRenderer() {
+  try {
+    const r = new THREE.WebGLRenderer({ canvas, antialias: true, alpha: false, powerPreference: "high-performance" });
+    r.setPixelRatio(Math.min(window.devicePixelRatio || 1, 2));
+    r.setSize(window.innerWidth, window.innerHeight, false);
+    r.setClearColor(0x05070b, 1);
+    r.toneMapping = THREE.ACESFilmicToneMapping;
+    r.toneMappingExposure = 1.15;
+    return r;
+  } catch (e) {
+    return null;
+  }
+}
+
+renderer = createRenderer();
+
+if (renderer) {
+  scene = new THREE.Scene();
+  camera = new THREE.PerspectiveCamera(FOV, window.innerWidth / Math.max(1, window.innerHeight), 1, 8000);
+
+  composer = new EffectComposer(renderer);
+  composer.addPass(new RenderPass(scene, camera));
+  // 第 1 条效果的“叠一遍”：UnrealBloomPass 让每个发光点带光晕
+  bloomPass = new UnrealBloomPass(
+    new THREE.Vector2(window.innerWidth, window.innerHeight), 0.92, 0.55, 0.16
+  );
+  composer.addPass(bloomPass);
+  composer.addPass(new OutputPass());
+
+  // 场景中心的冷色雾光（用 canvas 生成的径向渐变纹理，不引外部资源）
+  const glowTex = makeGlowTexture();
+  const glow = new THREE.Sprite(new THREE.SpriteMaterial({
+    map: glowTex, color: 0xffffff, transparent: true, opacity: 0.9,
+    blending: THREE.AdditiveBlending, depthWrite: false, depthTest: false,
+  }));
+  glow.scale.set(1500, 1500, 1);
+  glow.renderOrder = -10;
+  scene.add(glow);
+  scene.userData.glow = glow;
+}
+
+function makeGlowTexture() {
+  const c = document.createElement("canvas");
+  c.width = c.height = 256;
+  const g = c.getContext("2d");
+  const grad = g.createRadialGradient(128, 128, 0, 128, 128, 128);
+  grad.addColorStop(0.00, "rgba(38,66,116,0.55)");
+  grad.addColorStop(0.35, "rgba(24,44,80,0.26)");
+  grad.addColorStop(0.70, "rgba(12,22,40,0.09)");
+  grad.addColorStop(1.00, "rgba(5,7,11,0)");
+  g.fillStyle = grad;
+  g.fillRect(0, 0, 256, 256);
+  const tex = new THREE.CanvasTexture(c);
+  tex.colorSpace = THREE.SRGBColorSpace;
+  tex.needsUpdate = true;
+  return tex;
+}
+
+/* ============================================================
+   着色器
+   ============================================================ */
+// 点：加法混合 + 中心核 + 光晕；尺寸随深度缩小、随距离压暗
+const NODE_VERT = `
+attribute float aSize;
+attribute vec3 aColor;
+attribute float aOpacity;
+uniform float uHeight;
+uniform float uFovTan;
+uniform float uFogRef;
+varying vec3 vColor;
+varying float vAlpha;
+void main() {
+  vColor = aColor;
+  vec4 mv = modelViewMatrix * vec4(position, 1.0);
+  float d = max(-mv.z, 1.0);
+  float fog = clamp(uFogRef / d, 0.14, 1.0);
+  vAlpha = aOpacity * fog;
+  gl_PointSize = clamp(aSize * (uHeight * 0.5) / (uFovTan * d), 1.0, 110.0);
+  gl_Position = projectionMatrix * mv;
+}`;
+
+const NODE_FRAG = `
+varying vec3 vColor;
+varying float vAlpha;
+void main() {
+  vec2 p = gl_PointCoord - vec2(0.5);
+  float d = length(p) * 2.0;
+  if (d > 1.0) discard;
+  float halo = pow(1.0 - d, 2.4);
+  float core = smoothstep(0.52, 0.0, d);
+  vec3 col = vColor * (halo * 1.05) + vec3(1.0) * pow(core, 3.0) * 0.85;
+  float a = vAlpha * (core * 0.92 + halo * 0.5);
+  gl_FragColor = vec4(col * a, a);
+}`;
+
+// 线：同样加法混合，深度雾在顶点着色器里算（相机在转，不能烘死）
+const LINE_VERT = `
+attribute vec3 aColor;
+attribute float aAlpha;
+uniform float uFogRef;
+varying vec3 vColor;
+varying float vAlpha;
+void main() {
+  vColor = aColor;
+  vec4 mv = modelViewMatrix * vec4(position, 1.0);
+  float d = max(-mv.z, 1.0);
+  vAlpha = aAlpha * clamp(uFogRef / d, 0.10, 1.0);
+  gl_Position = projectionMatrix * mv;
+}`;
+
+const LINE_FRAG = `
+varying vec3 vColor;
+varying float vAlpha;
+void main() {
+  gl_FragColor = vec4(vColor * vAlpha, vAlpha);
+}`;
+
+const nodeUniforms = {
+  uHeight: { value: 800 },
+  uFovTan: { value: FOV_TAN },
+  uFogRef: { value: 640 },
+};
+const lineUniforms = { uFogRef: { value: 640 } };
+const particleUniforms = {
+  uHeight: { value: 800 },
+  uFovTan: { value: FOV_TAN },
+  uFogRef: { value: 640 },
+};
+
+function makeNodeMaterial() {
+  return new THREE.ShaderMaterial({
+    uniforms: nodeUniforms,
+    vertexShader: NODE_VERT,
+    fragmentShader: NODE_FRAG,
+    transparent: true,
+    depthWrite: false,
+    depthTest: true,
+    blending: THREE.AdditiveBlending,
+  });
+}
+
+function makeLineMaterial() {
+  return new THREE.ShaderMaterial({
+    uniforms: lineUniforms,
+    vertexShader: LINE_VERT,
+    fragmentShader: LINE_FRAG,
+    transparent: true,
+    depthWrite: false,
+    blending: THREE.AdditiveBlending,
+  });
+}
+
+function makeParticleMaterial() {
+  return new THREE.ShaderMaterial({
+    uniforms: particleUniforms,
+    vertexShader: NODE_VERT,
+    fragmentShader: NODE_FRAG,
+    transparent: true,
+    depthWrite: false,
+    blending: THREE.AdditiveBlending,
+  });
+}
+
+/* ============================================================
+   数据
+   ============================================================ */
+async function fetchJson(path) {
+  const ac = new AbortController();
+  const t = setTimeout(() => ac.abort(), 3500);
+  try {
+    const r = await fetch(API + path, {
+      signal: ac.signal,
+      cache: "no-store",
+      // 本机服务要求鉴权；这个头是面板专用豁免，旧版页面就这么用的
+      headers: { "X-Tan-Source": "dsh-plugin" },
+    });
+    if (!r.ok) throw new Error("http " + r.status);
+    return await r.json();
+  } finally {
+    clearTimeout(t);
+  }
+}
+
+// 兼容 {nodes, edges} 与 {nodes, links} 两种命名，字段名跟 api.py 对齐
+function normalizeGraph(g) {
+  const rawNodes = Array.isArray(g && g.nodes) ? g.nodes : [];
+  const out = [];
+  const seen = new Set();
+
+  for (const r of rawNodes) {
+    if (out.length >= MAX_NODES) break;
+    if (!r) continue;
+    const id = String(r.id != null ? r.id : ("anon-" + out.length));
+    if (seen.has(id)) continue;
+    seen.add(id);
+    out.push({
+      id,
+      layer: String(r.layer || "L2"),
+      label: String(r.label != null ? r.label : (r.summary != null ? r.summary : (r.content != null ? r.content : id))).slice(0, 120),
+      weight: Number(r.weight != null ? r.weight : (r.recall_count || 0)) || 0,
+      thread: (r.thread != null ? r.thread : (r.thread_id != null ? r.thread_id : null)),
+      age: (r.age_days != null ? r.age_days : null),
+    });
+  }
+
+  const byId = new Map(out.map(n => [n.id, n]));
+  const rawEdges = Array.isArray(g && g.edges) ? g.edges : (Array.isArray(g && g.links) ? g.links : []);
+  const edges = [];
+  const eseen = new Set();
+
+  for (const e of rawEdges) {
+    if (edges.length >= MAX_EDGES) break;
+    if (!e) continue;
+    const a = byId.get(String(e.source_id != null ? e.source_id : e.source));
+    const b = byId.get(String(e.target_id != null ? e.target_id : e.target));
+    if (!a || !b || a === b) continue;
+    const key = a.id < b.id ? a.id + "|" + b.id : b.id + "|" + a.id;
+    if (eseen.has(key)) continue;
+    eseen.add(key);
+    edges.push({ a, b, type: String(e.edge_type || e.type || "link") });
+  }
+
+  return { nodes: out, edges };
+}
+
+const DEMO_TEXT = [
+  "接口没连上，这是本地演示数据",
+  "身份：我不当应声虫",
+  "方法：先读文件再改",
+  "事实：数据目录唯一在用库",
+  "教训：别用系统提示去检索",
+  "情景：昨晚把 2D 版换掉了",
+  "事实：three.js r160 全部离线",
+  "方法：改完自己跑验收",
+];
+
+// 兜底假数据：接口 404 / 服务没起时还能看见东西
+function fallbackGraph() {
+  const plan = [["L4", 2], ["L5", 2], ["L3", 10], ["L2", 26], ["L2-", 6], ["L1", 18]];
+  const nodes = [];
+  const threads = [];
+  for (let t = 0; t < 24; t++) threads.push("th-demo-" + t);
+
+  let n = 0;
+  for (const [layer, count] of plan) {
+    for (let i = 0; i < count; i++) {
+      n++;
+      const scattered = layer === "L1" || layer === "L2" || layer === "L2-";
+      nodes.push({
+        id: "demo-" + n,
+        layer,
+        label: DEMO_TEXT[(n - 1) % DEMO_TEXT.length],
+        weight: (n * 7) % 9,
+        // 三分之二挂 thread，剩下的散在壳上，演示也能看出分壳
+        thread: (scattered && n % 3 !== 0) ? threads[(n * 5) % threads.length] : null,
+        age_days: (n % 30) / 3,
+      });
+    }
+  }
+
+  const edges = [];
+  const byThread = new Map();
+  for (const nd of nodes) {
+    if (!nd.thread) continue;
+    if (!byThread.has(nd.thread)) byThread.set(nd.thread, []);
+    byThread.get(nd.thread).push(nd.id);
+  }
+  for (const ids of byThread.values()) {
+    for (let i = 0; i < ids.length - 1; i++) {
+      edges.push({ source: ids[i], target: ids[i + 1], type: "thread" });
+    }
+  }
+  for (let i = 0; i < 48; i++) {
+    const a = nodes[Math.floor(hash01("ea" + i) * nodes.length)];
+    const b = nodes[Math.floor(hash01("eb" + i) * nodes.length)];
+    if (a && b && a !== b) edges.push({ source: a.id, target: b.id, type: "entity" });
+  }
+  return { nodes, edges };
+}
+
+/* ============================================================
+   布局：按记忆层分壳 + thread 成团
+   ============================================================ */
+function layout() {
+  // 每个 (层, thread) 组的规模，决定这团散多开
+  const groupSize = new Map();
+  const groupKey = (nd) => nd.layer + "|" + (nd.thread != null ? "t" + nd.thread : "solo");
+  for (const nd of state.nodes) {
+    const k = groupKey(nd);
+    groupSize.set(k, (groupSize.get(k) || 0) + 1);
+  }
+
+  for (const nd of state.nodes) {
+    if (nd.pos) continue;              // 老节点保持原位，刷新不跳
+    const shell = SHELL_R[nd.layer] != null ? SHELL_R[nd.layer] : 0.68;
+    const R = SCENE_R * shell;
+
+    // thread_id → 球面方向；同一 thread 的所有成员共用这个方向，天然成团
+    const anchor = (nd.thread != null) ? ("th:" + nd.thread) : ("id:" + nd.id);
+    const u = hash01(anchor + "|u");
+    const v = hash01(anchor + "|v");
+    const y = 2 * u - 1;
+    const rr = Math.sqrt(Math.max(0, 1 - y * y));
+    const phi = v * Math.PI * 2;
+    const dir = new THREE.Vector3(Math.cos(phi) * rr, y, Math.sin(phi) * rr);
+
+    const size = groupSize.get(groupKey(nd)) || 1;
+    const spread = (nd.thread != null) ? Math.min(38, 10 + Math.sqrt(size) * 8) : 22;
+
+    const g1 = hash01(nd.id + "|a");
+    const g2 = hash01(nd.id + "|b");
+    const g3 = hash01(nd.id + "|c");
+    const theta = g1 * Math.PI * 2;
+    const rr2 = spread * Math.sqrt(g2);
+
+    // 以 dir 为法线取切向基
+    const up = Math.abs(dir.y) > 0.92 ? new THREE.Vector3(1, 0, 0) : new THREE.Vector3(0, 1, 0);
+    const t1 = new THREE.Vector3().crossVectors(up, dir).normalize();
+    const t2 = new THREE.Vector3().crossVectors(dir, t1).normalize();
+
+    const pos = dir.clone().multiplyScalar(R + (g3 - 0.5) * spread * 0.8);
+    pos.addScaledVector(t1, Math.cos(theta) * rr2);
+    pos.addScaledVector(t2, Math.sin(theta) * rr2);
+    nd.pos = pos;
+  }
+}
+
+/* ============================================================
+   图元构建（全用 BufferGeometry 批量画，不是一个点一个 Mesh）
+   ============================================================ */
+function disposeObject(obj) {
+  if (!obj) return;
+  scene.remove(obj);
+  if (obj.geometry) obj.geometry.dispose();
+  if (obj.material) obj.material.dispose();
+}
+
+function buildNodes() {
+  disposeObject(nodePoints);
+  nodePoints = null;
+
+  const n = state.nodes.length;
+  const pos = new Float32Array(n * 3);
+  const col = new Float32Array(n * 3);
+  const siz = new Float32Array(n);
+  const alp = new Float32Array(n);
+
+  nodeAlphaTarget = new Float32Array(n);
+  nodeSizeBase = new Float32Array(n);
+  nodeAppear = new Float32Array(n);
+
+  for (let i = 0; i < n; i++) {
+    const nd = state.nodes[i];
+    nd.color = new THREE.Color(COLORS[nd.layer] || "#8b949e");
+    // 内核的身份/自我点给一点底噪增益，让它从中间一眼能认出来
+    const coreBoost = (nd.layer === "L4" || nd.layer === "L5") ? 3.5 : 0;
+    nd.size = 3 + coreBoost + Math.min(9, Math.max(0, nd.weight) * 0.9);
+    nodeSizeBase[i] = nd.size;
+
+    pos[i * 3 + 0] = nd.pos.x;
+    pos[i * 3 + 1] = nd.pos.y;
+    pos[i * 3 + 2] = nd.pos.z;
+    col[i * 3 + 0] = nd.color.r;
+    col[i * 3 + 1] = nd.color.g;
+    col[i * 3 + 2] = nd.color.b;
+    siz[i] = nd.size;
+    alp[i] = 0;
+
+    nodeAlphaTarget[i] = 1;
+    nodeAppear[i] = (nd.appear === 1) ? 1 : 0;
+    if (nodeAppear[i] < 1) fadeActive = true;
+  }
+
+  const geo = new THREE.BufferGeometry();
+  geo.setAttribute("position", new THREE.BufferAttribute(pos, 3));
+  geo.setAttribute("aColor", new THREE.BufferAttribute(col, 3));
+  geo.setAttribute("aSize", new THREE.BufferAttribute(siz, 1));
+  geo.setAttribute("aOpacity", new THREE.BufferAttribute(alp, 1));
+  geo.computeBoundingSphere();
+
+  nodeGeo = geo;
+  nodeAttr = {
+    position: geo.getAttribute("position"),
+    aColor: geo.getAttribute("aColor"),
+    aSize: geo.getAttribute("aSize"),
+    aOpacity: geo.getAttribute("aOpacity"),
+  };
+
+  nodePoints = new THREE.Points(geo, makeNodeMaterial());
+  nodePoints.frustumCulled = false;
+  scene.add(nodePoints);
+}
+
+function bezierPoint(a, c, b, t, out) {
+  const it = 1 - t;
+  const k0 = it * it;
+  const k1 = 2 * it * t;
+  const k2 = t * t;
+  out.set(
+    a.x * k0 + c.x * k1 + b.x * k2,
+    a.y * k0 + c.y * k1 + b.y * k2,
+    a.z * k0 + c.z * k1 + b.z * k2
+  );
+  return out;
+}
+
+function buildEdges() {
+  disposeObject(edgeLines);
+  edgeLines = null;
+
+  const m = state.edges.length;
+  if (!m) {
+    edgeAlphaBase = new Float32Array(0);
+    return;
+  }
+
+  const vcount = m * CURVE_SEGS * 2;
+  const pos = new Float32Array(vcount * 3);
+  const col = new Float32Array(vcount * 3);
+  const alp = new Float32Array(vcount);
+
+  const ctrl = new THREE.Vector3();
+  const p0 = new THREE.Vector3();
+  const p1 = new THREE.Vector3();
+
+  for (let i = 0; i < m; i++) {
+    const e = state.edges[i];
+    const A = e.a.pos;
+    const B = e.b.pos;
+
+    // 二次贝塞尔的控制点：中点沿垂直方向抬起，形成弧度
+    const dx = B.x - A.x, dy = B.y - A.y, dz = B.z - A.z;
+    const len = Math.hypot(dx, dy, dz) || 1;
+    let ux = 0, uy = 1, uz = 0;
+    if (Math.abs(dy / len) > 0.9) { ux = 1; uy = 0; uz = 0; }
+    let px = dy * uz - dz * uy;
+    let py = dz * ux - dx * uz;
+    let pz = dx * uy - dy * ux;
+    const pl = Math.hypot(px, py, pz) || 1;
+    px /= pl; py /= pl; pz /= pl;
+
+    const bend = (hash01(e.a.id + ">" + e.b.id) - 0.5) * len * 0.46;
+    ctrl.set(
+      (A.x + B.x) * 0.5 + px * bend,
+      (A.y + B.y) * 0.5 + py * bend,
+      (A.z + B.z) * 0.5 + pz * bend
+    );
+    e.ctrl = new THREE.Vector3(ctrl.x, ctrl.y, ctrl.z);
+
+    const style = EDGE_STYLE[e.type] || EDGE_STYLE.link;
+
+    for (let s = 0; s < CURVE_SEGS; s++) {
+      const t0 = s / CURVE_SEGS;
+      const t1 = (s + 1) / CURVE_SEGS;
+      bezierPoint(A, e.ctrl, B, t0, p0);
+      bezierPoint(A, e.ctrl, B, t1, p1);
+
+      const vi = (i * CURVE_SEGS + s) * 2;
+      pos[vi * 3 + 0] = p0.x; pos[vi * 3 + 1] = p0.y; pos[vi * 3 + 2] = p0.z;
+      pos[(vi + 1) * 3 + 0] = p1.x; pos[(vi + 1) * 3 + 1] = p1.y; pos[(vi + 1) * 3 + 2] = p1.z;
+
+      // 首尾有明暗差，看着像有方向
+      const a0 = style.alpha * (1 - t0 * 0.45);
+      const a1 = style.alpha * (1 - t1 * 0.45);
+      alp[vi] = a0;
+      alp[vi + 1] = a1;
+
+      col[vi * 3 + 0] = style.color.r; col[vi * 3 + 1] = style.color.g; col[vi * 3 + 2] = style.color.b;
+      col[(vi + 1) * 3 + 0] = style.color.r;
+      col[(vi + 1) * 3 + 1] = style.color.g;
+      col[(vi + 1) * 3 + 2] = style.color.b;
+    }
+  }
+
+  edgeAlphaBase = alp.slice(0);
+
+  const geo = new THREE.BufferGeometry();
+  geo.setAttribute("position", new THREE.BufferAttribute(pos, 3));
+  geo.setAttribute("aColor", new THREE.BufferAttribute(col, 3));
+  geo.setAttribute("aAlpha", new THREE.BufferAttribute(alp, 1));
+  geo.computeBoundingSphere();
+
+  edgeGeo = geo;
+  edgeLines = new THREE.LineSegments(geo, makeLineMaterial());
+  edgeLines.frustumCulled = false;
+  scene.add(edgeLines);
+}
+
+function buildParticles() {
+  disposeObject(particlePoints);
+  particlePoints = null;
+  particles.length = 0;
+
+  const m = state.edges.length;
+  if (!m) {
+    particleAlphaBase = new Float32Array(0);
+    return;
+  }
+
+  const count = Math.min(PARTICLE_MAX, m * 2);
+  const pos = new Float32Array(count * 3);
+  const col = new Float32Array(count * 3);
+  const siz = new Float32Array(count);
+  const alp = new Float32Array(count);
+  particleAlphaBase = new Float32Array(count);
+
+  for (let i = 0; i < count; i++) {
+    const ei = Math.floor(hash01("pe" + i) * m);
+    const e = state.edges[ei];
+    const style = EDGE_STYLE[e.type] || EDGE_STYLE.link;
+
+    particles.push({
+      edge: ei,
+      t: hash01("pt" + i),
+      spd: 0.055 + hash01("ps" + i) * 0.11,   // 每秒推进的曲线参数
+    });
+
+    col[i * 3 + 0] = Math.min(1, style.color.r * 1.5);
+    col[i * 3 + 1] = Math.min(1, style.color.g * 1.5);
+    col[i * 3 + 2] = Math.min(1, style.color.b * 1.5);
+    siz[i] = 1.5 + hash01("pz" + i) * 1.3;
+    alp[i] = 0.85;
+    particleAlphaBase[i] = 0.85;
+  }
+
+  const geo = new THREE.BufferGeometry();
+  geo.setAttribute("position", new THREE.BufferAttribute(pos, 3));
+  geo.setAttribute("aColor", new THREE.BufferAttribute(col, 3));
+  geo.setAttribute("aSize", new THREE.BufferAttribute(siz, 1));
+  geo.setAttribute("aOpacity", new THREE.BufferAttribute(alp, 1));
+
+  particleGeo = geo;
+  particlePoints = new THREE.Points(geo, makeParticleMaterial());
+  particlePoints.frustumCulled = false;
+  scene.add(particlePoints);
+}
+
+/* ============================================================
+   焦点：悬停的点 + 邻居保持亮度，其余压到 15%
+   ============================================================ */
+function currentFocus() {
+  return state.hovered || state.selected;
+}
+
+function applyFocus() {
+  const f = currentFocus();
+  const id = f ? f.id : null;
+  const allowed = new Set();
+  if (id) {
+    allowed.add(id);
+    const nb = state.adj.get(id);
+    if (nb) for (const x of nb) allowed.add(x);
+  }
+
+  const n = state.nodes.length;
+  for (let i = 0; i < n; i++) {
+    const nd = state.nodes[i];
+    nodeAlphaTarget[i] = (!id || allowed.has(nd.id)) ? 1 : 0.15;
+  }
+  writeNodeAlpha();
+
+  // 被聚焦的点放大一圈，避免 15% 调光后找不到它在哪
+  if (nodeAttr && nodeSizeBase) {
+    const sz = nodeAttr.aSize.array;
+    for (let i = 0; i < n; i++) {
+      const nd = state.nodes[i];
+      let boost = 1;
+      if (id) boost = (nd.id === id) ? 2.4 : (allowed.has(nd.id) ? 1.35 : 1);
+      sz[i] = nodeSizeBase[i] * boost;
+    }
+    nodeAttr.aSize.needsUpdate = true;
+  }
+
+  if (edgeGeo) {
+    const attr = edgeGeo.getAttribute("aAlpha");
+    const arr = attr.array;
+    for (let i = 0; i < state.edges.length; i++) {
+      const e = state.edges[i];
+      const factor = (!id || (allowed.has(e.a.id) && allowed.has(e.b.id))) ? 1 : 0.15;
+      const start = i * CURVE_SEGS * 2;
+      const end = start + CURVE_SEGS * 2;
+      for (let v = start; v < end; v++) arr[v] = edgeAlphaBase[v] * factor;
+    }
+    attr.needsUpdate = true;
+  }
+
+  if (particleGeo) {
+    const attr = particleGeo.getAttribute("aOpacity");
+    const arr = attr.array;
+    for (let i = 0; i < particles.length; i++) {
+      const e = state.edges[particles[i].edge];
+      let factor = 1;
+      if (id && e && !(allowed.has(e.a.id) && allowed.has(e.b.id))) factor = 0.12;
+      arr[i] = particleAlphaBase[i] * factor;
+    }
+    attr.needsUpdate = true;
+  }
+}
+
+function writeNodeAlpha() {
+  if (!nodeAttr) return;
+  const arr = nodeAttr.aOpacity.array;
+  for (let i = 0; i < state.nodes.length; i++) {
+    arr[i] = nodeAlphaTarget[i] * nodeAppear[i];
+  }
+  nodeAttr.aOpacity.needsUpdate = true;
+}
+
+/* ============================================================
+   场景重建
+   ============================================================ */
+function rebuildScene() {
+  if (!scene) return;
+  buildNodes();
+  buildEdges();
+  buildParticles();
+  applyFocus();
+}
+
+function applyGraph(g) {
+  const norm = normalizeGraph(g);
+  const oldMap = new Map(state.nodes.map(nd => [nd.id, nd]));
+
+  for (const nd of norm.nodes) {
+    const p = oldMap.get(nd.id);
+    if (p && p.pos) {
+      nd.pos = p.pos;      // 复用位置，刷新时不会乱跳
+      nd.appear = 1;
+    } else {
+      nd.appear = 0;
+    }
+  }
+
+  state.nodes = norm.nodes;
+  state.edges = norm.edges;
+
+  state.adj = new Map();
+  for (const nd of state.nodes) state.adj.set(nd.id, new Set());
+  for (const e of state.edges) {
+    const sa = state.adj.get(e.a.id);
+    const sb = state.adj.get(e.b.id);
+    if (sa) sa.add(e.b.id);
+    if (sb) sb.add(e.a.id);
+  }
+
+  // 悬停/选中的节点对象会被新对象替换，这里按 id 重新指过去
+  state.hovered = state.hovered ? (state.nodes.find(nd => nd.id === state.hovered.id) || null) : null;
+  if (state.selected) {
+    state.selected = state.nodes.find(nd => nd.id === state.selected.id) || null;
+  }
+
+  layout();
+  fadeActive = true;
+  rebuildScene();
+}
+
+/* ============================================================
+   相机：阻尼惯性 / 缓慢自转 / 呼吸式推拉 / 平滑飞向节点
+   ============================================================ */
+const cam = {
+  az: 0.72, el: 0.30, dist: 720,
+  azGoal: 0.72, elGoal: 0.30, distGoal: 720,
+  target: new THREE.Vector3(),
+  targetGoal: new THREE.Vector3(),
+  spinVel: 0,
+  spin: true,
+  flight: null,
+};
+const CAM_HOME = { az: 0.72, el: 0.30, dist: 720 };
+
+const drag = { active: false, x: 0, y: 0, moved: 0, t0: 0 };
+
+function updateCamera(dt, now) {
+  if (cam.flight) {
+    const f = cam.flight;
+    f.t += dt;
+    const u = clamp(f.t / f.dur, 0, 1);
+    // easeInOutCubic：起飞和落地都软
+    const e = u < 0.5 ? 4 * u * u * u : 1 - Math.pow(-2 * u + 2, 3) / 2;
+    cam.az = lerp(f.az0, f.az1, e);
+    cam.el = lerp(f.el0, f.el1, e);
+    cam.dist = lerp(f.d0, f.d1, e);
+    cam.target.lerpVectors(f.t0, f.t1, e);
+    if (u >= 1) {
+      cam.azGoal = cam.az;
+      cam.elGoal = cam.el;
+      cam.distGoal = cam.dist;
+      cam.targetGoal.copy(cam.target);
+      cam.flight = null;
+    }
+  } else {
+    if (!drag.active) {
+      // 缓慢自转 + 松手后的惯性衰减
+      if (cam.spin) cam.azGoal += dt * 0.105;
+      cam.azGoal += cam.spinVel * dt;
+      cam.spinVel *= Math.exp(-2.6 * dt);
+      if (Math.abs(cam.spinVel) < 0.004) cam.spinVel = 0;
+    }
+    const k = 1 - Math.exp(-6.5 * dt);
+    cam.az += (cam.azGoal - cam.az) * k;
+    cam.el += (cam.elGoal - cam.el) * k;
+    cam.dist += (cam.distGoal - cam.dist) * k;
+    cam.target.lerp(cam.targetGoal, 1 - Math.exp(-5.0 * dt));
+  }
+
+  cam.el = clamp(cam.el, -1.30, 1.30);
+
+  // 呼吸式推拉：来回 ±3%，飞行中停掉免得抖
+  const breathe = cam.flight ? 0 : Math.sin(now * 0.00035) * 0.03;
+  const d = cam.dist * (1 + breathe);
+
+  const ce = Math.cos(cam.el), se = Math.sin(cam.el);
+  camera.position.set(
+    cam.target.x + d * ce * Math.sin(cam.az),
+    cam.target.y + d * se,
+    cam.target.z + d * ce * Math.cos(cam.az)
+  );
+  camera.lookAt(cam.target);
+}
+
+function flyTo(pos, distHint) {
+  const d0 = pos.length();
+  let az1 = cam.az;
+  let el1 = cam.el;
+  if (d0 > 1) {
+    az1 = Math.atan2(pos.x, pos.z);
+    el1 = clamp(Math.asin(clamp(pos.y / d0, -1, 1)) * 0.8, -1.15, 1.15);
+  }
+  // 走最短角路，别绕一圈
+  const delta = ((az1 - cam.az + Math.PI * 3) % (Math.PI * 2)) - Math.PI;
+  cam.flight = {
+    t: 0,
+    dur: 1.25,
+    az0: cam.az,
+    az1: cam.az + delta,
+    el0: cam.el,
+    el1,
+    d0: cam.dist,
+    d1: clamp(distHint, 190, 1000),
+    t0: cam.target.clone(),
+    t1: pos.clone(),
+  };
+  cam.spinVel = 0;
+}
+
+function resetView() {
+  state.selected = null;
+  state.hovered = null;
+  applyFocus();
+  cam.flight = {
+    t: 0, dur: 1.1,
+    az0: cam.az, az1: cam.az + (((CAM_HOME.az - cam.az + Math.PI * 3) % (Math.PI * 2)) - Math.PI),
+    el0: cam.el, el1: CAM_HOME.el,
+    d0: cam.dist, d1: CAM_HOME.dist,
+    t0: cam.target.clone(), t1: new THREE.Vector3(),
+  };
+}
+
+/* ============================================================
+   拾取 / 交互
+   ============================================================ */
+function pickNode(cx, cy) {
+  if (!camera) return null;
+  const w = window.innerWidth, h = Math.max(1, window.innerHeight);
+  let best = null;
+  let bestD = 1e9;
+
+  for (const nd of state.nodes) {
+    tmpV.copy(nd.pos).project(camera);
+    if (tmpV.z > 1) continue;
+    const sx = (tmpV.x * 0.5 + 0.5) * w;
+    const sy = (-tmpV.y * 0.5 + 0.5) * h;
+    if (sx < -80 || sx > w + 80 || sy < -80 || sy > h + 80) continue;
+    const depth = camera.position.distanceTo(nd.pos);
+    const px = ((nd.size || 4) * h * 0.5) / (FOV_TAN * Math.max(depth, 1)) * 0.9;
+    const hitR = Math.max(11, px * 1.5);
+    const d = Math.hypot(sx - cx, sy - cy);
+    if (d < hitR && d < bestD) { best = nd; bestD = d; }
+  }
+  return best;
+}
+
+const tipEl = document.getElementById("tip");
+
+function showTip(nd, cx, cy) {
+  if (!nd) { tipEl.style.display = "none"; return; }
+  const color = COLORS[nd.layer] || "#8b949e";
+  const pct = Math.min(100, (nd.weight || 0) * 12);
+  const ageTxt = (nd.age == null) ? "?" : Math.round(nd.age * 10) / 10;
+  tipEl.style.display = "block";
+  tipEl.style.left = Math.min(cx + 18, window.innerWidth - 340) + "px";
+  tipEl.style.top = Math.min(cy + 18, window.innerHeight - 150) + "px";
+  tipEl.innerHTML =
+    '<div class="t">' + esc(nd.label || nd.id) + "</div>" +
+    '<div class="m">' + esc(LABELS[nd.layer] || nd.layer) + " · " + ageTxt + " 天前</div>" +
+    '<div class="m">被用到 ' + (nd.weight || 0) + " 次</div>" +
+    (nd.thread ? '<div class="m">线程 ' + esc(String(nd.thread).slice(0, 22)) + "</div>" : "") +
+    '<div class="bar"><i style="width:' + pct + "%;background:" + color + '"></i></div>';
+}
+
+canvas.addEventListener("pointerdown", (e) => {
+  canvas.setPointerCapture(e.pointerId);
+  canvas.classList.add("drag");
+  drag.active = true;
+  drag.x = e.clientX;
+  drag.y = e.clientY;
+  drag.moved = 0;
+  drag.t0 = performance.now();
+});
+
+canvas.addEventListener("pointermove", (e) => {
+  if (drag.active) {
+    const dx = e.clientX - drag.x;
+    const dy = e.clientY - drag.y;
+    drag.x = e.clientX;
+    drag.y = e.clientY;
+    drag.moved += Math.abs(dx) + Math.abs(dy);
+
+    cam.azGoal -= dx * 0.005;
+    cam.elGoal = clamp(cam.elGoal + dy * 0.004, -1.30, 1.30);
+    cam.spinVel = -dx * 0.10;      // 松手后的惯性
+    tipEl.style.display = "none";
+    return;
+  }
+
+  const hit = pickNode(e.clientX, e.clientY);
+  if (hit !== state.hovered) {
+    state.hovered = hit;
+    applyFocus();
+  }
+  showTip(hit, e.clientX, e.clientY);
+});
+
+canvas.addEventListener("pointerup", (e) => {
+  const wasActive = drag.active;
+  drag.active = false;
+  canvas.classList.remove("drag");
+  if (!wasActive) return;
+  // 位移很小才算“点击”，否则是拖拽旋转
+  if (drag.moved < 7 && performance.now() - drag.t0 < 450) {
+    const hit = pickNode(e.clientX, e.clientY);
+    if (hit) {
+      state.selected = hit;
+      applyFocus();
+      const d0 = hit.pos.length();
+      flyTo(hit.pos, Math.max(200, d0 * 0.95));
+    } else {
+      state.selected = null;
+      applyFocus();
+    }
+  }
+});
+
+canvas.addEventListener("pointerleave", () => {
+  if (state.hovered) {
+    state.hovered = null;
+    applyFocus();
+  }
+  tipEl.style.display = "none";
+});
+
+canvas.addEventListener("wheel", (e) => {
+  e.preventDefault();
+  const k = e.deltaY < 0 ? 0.92 : 1.09;
+  cam.distGoal = clamp(cam.distGoal * k, 190, 1500);
+}, { passive: false });
+
+canvas.addEventListener("dblclick", () => resetView());
+
+window.addEventListener("keydown", (e) => {
+  if (e.code === "Space") {
+    e.preventDefault();
+    cam.spin = !cam.spin;
+  }
+});
+
+/* ============================================================
+   粒子：沿链路流动
+   ============================================================ */
+function updateParticles(dt) {
+  if (!particleGeo || !particles.length) return;
+  const attr = particleGeo.getAttribute("position");
+  const arr = attr.array;
+  for (let i = 0; i < particles.length; i++) {
+    const p = particles[i];
+    p.t += p.spd * dt;
+    if (p.t > 1) p.t -= 1;
+    const e = state.edges[p.edge];
+    if (!e || !e.ctrl) { arr[i * 3] = arr[i * 3 + 1] = arr[i * 3 + 2] = 0; continue; }
+    bezierPoint(e.a.pos, e.ctrl, e.b.pos, p.t, tmpB);
+    arr[i * 3 + 0] = tmpB.x;
+    arr[i * 3 + 1] = tmpB.y;
+    arr[i * 3 + 2] = tmpB.z;
+  }
+  attr.needsUpdate = true;
+}
+
+function updateFade(dt) {
+  if (!fadeActive) return;
+  let done = true;
+  for (let i = 0; i < nodeAppear.length; i++) {
+    if (nodeAppear[i] < 1) {
+      nodeAppear[i] = Math.min(1, nodeAppear[i] + dt * 1.6);
+      if (nodeAppear[i] < 1) done = false;
+    }
+  }
+  writeNodeAlpha();
+  if (done) fadeActive = false;
+}
+
+/* ============================================================
+   聚焦节点的浮动标签
+   ============================================================ */
+const focusLabelEl = document.getElementById("focusLabel");
+
+function updateFocusLabel() {
+  const f = currentFocus();
+  if (!f || !camera) { focusLabelEl.style.display = "none"; return; }
+  tmpV.copy(f.pos).project(camera);
+  if (tmpV.z > 1) { focusLabelEl.style.display = "none"; return; }
+  const w = window.innerWidth, h = window.innerHeight;
+  const sx = (tmpV.x * 0.5 + 0.5) * w;
+  const sy = (-tmpV.y * 0.5 + 0.5) * h;
+  focusLabelEl.style.display = "block";
+  focusLabelEl.style.left = sx + "px";
+  focusLabelEl.style.top = (sy - 16) + "px";
+  const txt = (f.label || f.id);
+  focusLabelEl.textContent = txt.length > 26 ? txt.slice(0, 26) + "…" : txt;
+}
+
+/* ============================================================
+   HUD
+   ============================================================ */
+function setState(ok, demo) {
+  document.getElementById("state").textContent = ok ? "已连接" : (demo ? "演示数据" : "未连接");
+  const dot = document.getElementById("dot");
+  dot.className = ok ? "on" : (demo ? "demo" : "");
+}
+
+function updateHud() {
+  document.getElementById("nCount").textContent = state.nodes.length;
+  document.getElementById("eCount").textContent = state.edges.length;
+  document.getElementById("mCount").textContent = (state.stats.memories != null) ? state.stats.memories : state.nodes.length;
+
+  let threads = state.stats.threads;
+  if (threads == null) {
+    const s = new Set();
+    for (const nd of state.nodes) if (nd.thread != null) s.add(nd.thread);
+    threads = s.size;
+  }
+  document.getElementById("tCount").textContent = threads;
+  document.getElementById("lCount").textContent = (state.stats.open_loops != null) ? state.stats.open_loops : 0;
+
+  // 层统计：优先用 /status 的 by_layer，接口没给就从节点里数
+  let byLayer = state.stats.by_layer;
+  if (!byLayer || typeof byLayer !== "object") byLayer = {};
+  const counts = {};
+  let total = 0;
+  for (const k of LAYER_ORDER) {
+    let c = Number(byLayer[k] || 0);
+    if (!c) c = state.nodes.filter(nd => nd.layer === k).length;
+    counts[k] = c;
+    total += c;
+  }
+  const box = document.getElementById("layers");
+  box.innerHTML = LAYER_ORDER.filter(k => counts[k] > 0).map(k => {
+    const pct = total ? Math.round(counts[k] / total * 100) : 0;
+    return '<div class="lay"><span>' + LABELS[k] + '</span>' +
+      '<span class="bar"><i style="width:' + pct + '%;background:' + COLORS[k] + '"></i></span>' +
+      '<span class="ct">' + counts[k] + "</span></div>";
+  }).join("");
+}
+
+/* ============================================================
+   数据加载
+   ============================================================ */
+async function load() {
+  let ok = false;
+  try {
+    const g = await fetchJson("/graph?limit=" + MAX_NODES);
+    if (!g || !Array.isArray(g.nodes) || !g.nodes.length) throw new Error("empty graph");
+    applyGraph(g);
+    ok = true;
+  } catch (err) {
+    if (!state.nodes.length) {
+      applyGraph(fallbackGraph());
+      state.demo = true;
+    }
+  }
+
+  if (ok) {
+    try {
+      const s = await fetchJson("/status");
+      if (s) state.stats = s;
+      state.demo = false;
+    } catch (err) {
+      /* /status 挂了不影响图 */
+    }
+  }
+
+  setState(ok, state.demo);
+  updateHud();
+  document.getElementById("clock").textContent =
+    new Date().toLocaleTimeString("zh-CN", { hour12: false });
+}
+
+/* ============================================================
+   尺寸 / 主循环
+   ============================================================ */
+function resize() {
+  if (!renderer) return;
+  const w = window.innerWidth;
+  const h = Math.max(1, window.innerHeight);
+  renderer.setPixelRatio(Math.min(window.devicePixelRatio || 1, 2));
+  renderer.setSize(w, h, false);
+  camera.aspect = w / h;
+  camera.updateProjectionMatrix();
+  composer.setSize(w, h);
+  const devH = renderer.domElement.height;
+  nodeUniforms.uHeight.value = devH;
+  particleUniforms.uHeight.value = devH;
+}
+window.addEventListener("resize", resize);
+
+let lastT = performance.now();
+
+function animate(now) {
+  requestAnimationFrame(animate);
+  if (!renderer) return;
+
+  const dt = Math.min(0.05, Math.max(0.0001, (now - lastT) / 1000));
+  lastT = now;
+
+  updateCamera(dt, now);
+  updateParticles(dt);
+  updateFade(dt);
+  updateFocusLabel();
+  composer.render();
+}
+
+/* ============================================================
    启动
    ============================================================ */
-load();
-setInterval(load, CFG.refreshMs);
-requestAnimationFrame(frame);
+if (!renderer) {
+  document.getElementById("err").style.display = "flex";
+  setState(false, false);
+} else {
+  resize();
+  requestAnimationFrame(animate);
+  load();
+  setInterval(load, REFRESH_MS);
+}
 </script>
 </body>
 </html>

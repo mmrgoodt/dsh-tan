@@ -274,6 +274,94 @@ function Group(props) {
 }
 
 /* ============================================================
+   微信绑定（二维码是自研编码器画的，不走任何第三方库）
+   ============================================================ */
+async function apiWait(path, ms) {
+	const ac = new AbortController();
+	const t = setTimeout(() => ac.abort(), ms || 90000);
+	try {
+		const r = await fetch(API + path, { signal: ac.signal, headers: { "X-Tan-Source": "dsh-plugin" } });
+		if (!r.ok) throw new Error("HTTP " + r.status);
+		return await r.json();
+	} finally { clearTimeout(t); }
+}
+
+function Weixin() {
+	const [qr, setQr] = react.useState(null);
+	const [msg, setMsg] = react.useState("");
+	const [busy, setBusy] = react.useState(false);
+	const [acct, setAcct] = react.useState(null);
+
+	const loadStatus = async () => {
+		try { setAcct(await api("/weixin/status")); } catch (e) { /* 面板拉不到就算了 */ }
+	};
+	react.useEffect(() => { loadStatus(); }, []);
+
+	const start = async () => {
+		setBusy(true);
+		setMsg("正在向微信申请二维码…");
+		try {
+			const r = await apiWait("/weixin/qr?action=start", 30000);
+			if (r.ok && r.png) {
+				setQr(r);
+				setMsg("用手机微信「扫一扫」对着屏幕扫，扫完这里会自动变成已绑定");
+			} else {
+				setMsg("没拿到二维码：" + (r.error || "未知原因"));
+			}
+		} catch (e) {
+			setMsg("出码失败：" + e.message);
+		}
+		setBusy(false);
+	};
+
+	react.useEffect(() => {
+		if (!qr) return undefined;
+		let stop = false;
+		let timer = null;
+		const tick = async () => {
+			if (stop) return;
+			try {
+				const r = await apiWait("/weixin/qr?action=poll", 60000);
+				if (r.status === "confirmed") {
+					setQr(null);
+					setMsg("绑定成功：" + (r.botId || "凭据已写入 weixin-account.json"));
+					setAcct(r);
+					return;
+				}
+				if (r.status === "expired") {
+					setQr(null);
+					setMsg("二维码过期了，重新点一次「生成二维码」");
+					return;
+				}
+			} catch (e) { /* 一轮超时就再等一轮 */ }
+			if (!stop) timer = setTimeout(tick, 1500);
+		};
+		timer = setTimeout(tick, 1500);
+		return () => { stop = true; if (timer) clearTimeout(timer); };
+	}, [qr]);
+
+	return h(Group, { icon: "🔗", title: "微信绑定" },
+		h("div", { style: { display: "flex", gap: 20, alignItems: "flex-start", flexWrap: "wrap" } },
+			h("div", { style: { flex: "1 1 240px", minWidth: 220 } },
+				h("div", { className: "hip-hint", style: { fontSize: 12, opacity: 0.62, marginTop: 0 } },
+					acct && acct.bound
+						? "已绑定：" + acct.botId
+						: "还没绑定。生成一张二维码，微信扫一下，tan 就有了自己的机器人身份，发消息不再借别人的通道。"
+				),
+				h("div", { style: { display: "flex", gap: 8, marginTop: 12 } },
+					h("button", { className: "hip-btn pri", disabled: busy, onClick: start }, busy ? "生成中…" : (qr ? "换一张" : "生成二维码")),
+					h("button", { className: "hip-btn", onClick: loadStatus }, "刷新状态")
+				),
+				msg ? h("div", { className: "hip-hint", style: { fontSize: 12, opacity: 0.8, marginTop: 12, color: "#79c0ff" } }, msg) : null
+			),
+			qr ? h("div", { style: { background: "#fff", padding: 10, borderRadius: 12, lineHeight: 0 } },
+				h("img", { src: qr.png, width: 240, height: 240, alt: "微信绑定二维码", style: { display: "block" } })
+			) : null
+		)
+	);
+}
+
+/* ============================================================
    主组件
    ============================================================ */
 function ConfigCard() {
@@ -446,6 +534,7 @@ function ConfigCard() {
 		{ id: "params", label: "参数", n: null },
 		{ id: "memory", label: "记忆", n: st.memories },
 		{ id: "loops", label: "未闭合", n: loops.length },
+		{ id: "weixin", label: "微信", n: null },
 	];
 
 	return h("div", { className: "hip-root" },
@@ -477,6 +566,9 @@ function ConfigCard() {
 				}, t.label, t.n != null ? h("span", { className: "n" }, t.n) : null)
 			)
 		),
+
+		/* ============ 微信绑定页 ============ */
+		tab === "weixin" && h("div", null, h(Weixin)),
 
 		/* ============ 参数页 ============ */
 		tab === "params" && h("div", null,

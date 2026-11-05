@@ -50,7 +50,13 @@ def has_info(text):
 
 
 def should_keep(text, layer):
-    """这条值不值得进长期记忆"""
+    """这条值不值得进长期记忆
+
+    2026-11 调整：过程叙述的过滤已经挪到 writer 的提炼器（distill.py）里，
+    这里只再兜两道 —— 太短的空话、整句「我做完了」的流水账。
+    照老规则卡「必须有路径 / 版本号」，正常的陈述句（「我在做一个记忆插件」）
+    会被整条丢掉，那是记忆，不是噪音。
+    """
     if layer in ("L2-", "L3", "L4", "L5"):
         return True
     t = (text or "").strip()
@@ -60,7 +66,14 @@ def should_keep(text, layer):
         return True
     if _DECISION.search(t):
         return True
-    return False
+    try:
+        from .distill import is_process_narrative
+
+        if is_process_narrative(t):
+            return False
+    except Exception:
+        pass
+    return True
 
 
 def install_gate():

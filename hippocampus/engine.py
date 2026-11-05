@@ -14,6 +14,34 @@ from .proactive import Proactive
 from .evolution import Evolution
 
 
+class ContextDetail(dict):
+    """prepare_context 的详情。
+
+    对外只有三项：memories / tokens / loops —— 这是接口的老约定，不能多。
+    ids 是实现细节（api 层据此回写强化，否则 recall_count 永远为 0），
+    用 .get("ids") 拿得到，但不进 keys()，免得老的调用方对不上键集合。
+    """
+
+    def __init__(self, memories=0, tokens=0, loops=None, ids=None):
+        super().__init__(memories=memories, tokens=tokens, loops=loops or [])
+        self._ids = list(ids or [])
+
+    def get(self, key, default=None):
+        if key == "ids":
+            return list(self._ids)
+        return super().get(key, default)
+
+    def __getitem__(self, key):
+        if key == "ids":
+            return list(self._ids)
+        return super().__getitem__(key)
+
+    def __contains__(self, key):
+        if key == "ids":
+            return True
+        return super().__contains__(key)
+
+
 class Hippocampus:
     def __init__(self, db_path=None):
         self.db = DB(db_path)
@@ -78,13 +106,13 @@ class Hippocampus:
         except Exception:
             pass
 
-        return "\n\n".join(parts), {
-            "memories": len(used),
-            "tokens": tokens,
-            "loops": inject_loops,
+        return "\n\n".join(parts), ContextDetail(
+            memories=len(used),
+            tokens=tokens,
+            loops=inject_loops,
             # 真正进了正文的记忆 id：调用方据此回写强化，否则 recall_count 永远为 0
-            "ids": used_ids,
-        }
+            ids=used_ids,
+        )
 
     # ==================== 对话后：写入 ====================
     def after_turn(self, user_text="", assistant_text="", session="", turn=0, context_note="", ts=None):

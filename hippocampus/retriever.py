@@ -135,6 +135,76 @@ def score(mem, query_terms, now_terms=()):
     return rel * d * emo * reinforce * boost * conf * reject_penalty
 
 
+# ---------- 打分：相关度 × 时间衰减 × 重要度 ----------
+# 召回以前只按一个综合数排，看不出「为什么这条排前面」。
+# 现在拆成三段可解释的乘积，挂回 mem["score"] / mem["score_parts"]：
+#   total = (0.15 + rel) × decay × importance
+#   rel        —— 检索相关性（皮层激活 + 字面命中 + 主题集中度，召回里算好传进来）
+#   decay      —— 这条自己的 half_life_days 做指数衰减；pinned / protected 不衰减
+#   importance —— 层权重 × pinned × 保护 × recall_count × last_recalled 新近 × 被否定 × 置信
+RECENCY_BONUS = 0.35    # last_recalled 是刚碰过时的最大加成
+RECENCY_SCALE = 14.0    # 半个月不看，加成回落到 0
+RECALL_STEP = 0.25      # 每次被召回加 25%，最多叠 8 次
+RECALL_CAP = 8
+PIN_BONUS = 1.25
+PROTECT_BONUS = 1.10
+REJECT_PENALTY = 0.6    # 每被否定一次，重要度除以 1+0.6n
+
+
+def recency_of(mem, now=None):
+    """last_recalled 越近加成越高；从没被召回的算 1.0（不奖不罚）"""
+    last = mem.get("last_recalled")
+    if not last:
+        return 1.0
+    idle = max(0.0, ((now or time.time()) - float(last)) / 86400.0)
+    return 1.0 + RECENCY_BONUS * math.exp(-idle / RECENCY_SCALE)
+
+
+def importance_of(mem, now=None):
+    """重要度与使用：层权重、pinned、保护、召回次数、新近、被否定、置信
+
+    返回 (值, 分项字典) —— 分项是为了能一眼看出某条为什么排前面。
+    """
+    layer = float(config.LAYER_BOOST.get(mem.get("layer"), 1.0))
+    pin = PIN_BONUS if mem.get("pinned") else 1.0
+    prot = PROTECT_BONUS if mem.get("protected") else 1.0
+    rc = int(mem.get("recall_count") or 0)
+    use = 1.0 + RECALL_STEP * min(rc, RECALL_CAP)
+    rec = recency_of(mem, now)
+    rej = 1.0 / (1.0 + REJECT_PENALTY * int(mem.get("reject_count") or 0))
+    conf = float(mem.get("confidence") or 0.7)
+    total = layer * pin * prot * use * rec * rej * conf
+    return total, {
+        "layer": round(layer, 4),
+        "pin": pin,
+        "protect": prot,
+        "recall": round(use, 4),
+        "recency": round(rec, 4),
+        "reject": round(rej, 4),
+        "confidence": round(conf, 4),
+    }
+
+
+def rank_score(mem, rel, now=None):
+    """单条候选的总分（可解释）
+
+    rel 由召回阶段算好（皮层激活 + 字面命中 + 主题集中度）。
+    衰减用这条记忆自己的 half_life_days —— 情景记忆 3 天，身份层几乎不衰减。
+    pinned / protected 由 decay() 直接给 1.0，不参与衰减。
+    """
+    rel = max(0.0, float(rel or 0.0))
+    d = decay(mem)
+    imp, parts = importance_of(mem, now)
+    total = (0.15 + rel) * d * imp
+    return {
+        "total": total,
+        "rel": round(rel, 6),
+        "decay": round(d, 6),
+        "importance": round(imp, 6),
+        "parts": parts,
+    }
+
+
 # 高频虚词 / 泛词：几乎每条记忆都有，拿它们算相关度只会"什么都命中"
 STOPWORDS = set("""
 今天 明天 昨天 现在 刚才 时候 什么 怎么 怎样 为什么 如何
@@ -419,10 +489,6 @@ class Retriever:
                     and foc < _top_foc * 0.35
                     and m.get("layer") not in ("L4", "L5")):
                 continue
-            s = score(m, terms)
-            if current_thread and m.get("thread_id") == current_thread:
-                s *= 1.5
-                rel = max(rel, 0.3)
             if has_query:
                 # 有查询时，完全不相关的直接丢掉（除非它是身份/程序层）
                 # L3（方法）以前是无条件保留的，结果每条查询的第一位
@@ -430,11 +496,22 @@ class Retriever:
                 # 程序性知识也该看相关度，不该霸着位置。
                 if rel <= 0 and m.get("layer") not in ("L4", "L5"):
                     continue
-                s = s * (0.15 + rel)      # 相关度主导
-            else:
-                s = decay(m) * config.LAYER_BOOST.get(m.get("layer"), 1.0)
+            if current_thread and m.get("thread_id") == current_thread:
+                rel = max(rel, 0.3)
+            # ------------------------------------------------------------------
+            # 总分 = 相关度 × 时间衰减 × 重要度与使用
+            # 旧算法只乘了 (0.15+rel)，衰减和「有没有人用」是散的；
+            # 现在一条记忆为什么排在前面，看 score_parts 就知道。
+            # ------------------------------------------------------------------
+            parts = rank_score(m, rel)
+            s = parts["total"]
+            if current_thread and m.get("thread_id") == current_thread:
+                s *= 1.5
+                parts["thread"] = 1.5
             if s <= 0:
                 continue
+            m["score"] = round(s, 6)
+            m["score_parts"] = parts
             scored.append((s, m))
 
         # 身份层 / 教训层保底：库里这两类一共就几条，
@@ -477,6 +554,10 @@ class Retriever:
                     if not nm or nm.get("status") != "active" or id(nm) in have:
                         continue
                     nm["_via"] = w          # 标记「这是联想出来的」，注入时可以排在后面
+                    # 联想的也带分值，调试时能看出「它靠梯度混进来的，不是命中」
+                    _part = rank_score(nm, 0.0)
+                    nm["score"] = round(_part["total"], 6)
+                    nm["score_parts"] = _part
                     picked.append(nm)
                     have.add(id(nm))
             except Exception:

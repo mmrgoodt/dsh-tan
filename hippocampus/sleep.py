@@ -224,6 +224,15 @@ def sleep(db, verbose=False):
     t0 = time.time()
     r = {"replayed": 0, "pruned": 0, "merged": 0}
 
+    # 概念表可能在空库里还没建（sleep 直接跑会 no such table: synapses）。
+    # 建表本身是幂等的，先补上再动重放和修剪。
+    try:
+        from . import cortex as _cortex0
+
+        _cortex0.ensure_schema(db)
+    except Exception:
+        pass
+
     r["replayed"] = replay(db)
 
     p = prune(db)
@@ -232,6 +241,15 @@ def sleep(db, verbose=False):
     # 合并先关掉：实测它会把高价值记忆并没，收益远小于风险。
     # 留着入口，等有更好的判据再开。
     r["merged"] = 0
+
+    # 沉降：老且没人碰的记忆转 dormant（不删）。
+    # 遗忘以前只有参数没有任务，睡眠跑完也没人动状态，等于没遗忘。
+    try:
+        from .forget import settle as _settle
+
+        r["settled"] = _settle(db).get("settled", 0)
+    except Exception:
+        r["settled"] = 0
 
     # 重建概念网（合并后线索变了）
     try:
@@ -242,14 +260,62 @@ def sleep(db, verbose=False):
 
     r["ms"] = int((time.time() - t0) * 1000)
     if verbose:
-        print("睡眠完成：重放 %d 次 / 剪掉 %d 条突触 / 合并 %d 对记忆 / %dms"
-              % (r["replayed"], r["pruned"], r["merged"], r["ms"]))
+        print("睡眠完成：重放 %d 次 / 剪掉 %d 条突触 / 合并 %d 对记忆 / 沉降 %d 条 / %dms"
+              % (r["replayed"], r["pruned"], r["merged"], r.get("settled", 0), r["ms"]))
     return r
 
 
-if __name__ == "__main__":
+def main(argv=None):
+    """命令行入口
+
+      python -m hippocampus.sleep --settle        只跑一次沉降（老记忆转 dormant）
+      python -m hippocampus.sleep --settle --days 7 --dry-run
+      python -m hippocampus.sleep                 跑一次完整睡眠（含沉降）
+    """
+    import argparse
     import os
     import sys
-    sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-    from hippocampus.db import DB
-    sleep(DB(), verbose=True)
+
+    ap = argparse.ArgumentParser(
+        prog="python -m hippocampus.sleep",
+        description="睡眠维护：重放 / 修剪 / 沉降")
+    ap.add_argument("--settle", action="store_true",
+                    help="只跑沉降，不跑重放和修剪")
+    ap.add_argument("--days", type=float, default=None,
+                    help="沉降天数阈值（默认读 config.SETTLE_DAYS，14 天）")
+    ap.add_argument("--max-recall", type=int, default=None,
+                    help="召回次数 ≤ 这个数才算没人用（默认 config.SETTLE_MAX_RECALL）")
+    ap.add_argument("--dry-run", action="store_true", help="只统计，不改状态")
+    ap.add_argument("--verbose", "-v", action="store_true", help="打印明细")
+    args = ap.parse_args(argv)
+
+    # 允许直接 `python hippocampus/sleep.py` 跑（此时没有包上下文）
+    if __package__ in (None, ""):
+        sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+        from hippocampus.db import DB  # type: ignore
+        from hippocampus.forget import settle as _settle  # type: ignore
+    else:
+        from .db import DB
+        from .forget import settle as _settle
+
+    db = DB()
+    if args.settle:
+        st = _settle(db, days=args.days, max_recall=args.max_recall, dry_run=args.dry_run)
+        print("沉降%s：扫描 %d 条 active / 转 dormant %d 条（阈值 %g 天，召回 ≤%d）"
+              % ("（dry-run）" if args.dry_run else "",
+                 st["scanned"], st["settled"], st["days"], st["max_recall"]))
+        if args.verbose:
+            for mid in st["ids"]:
+                mem = db.get_memory(mid) or {}
+                print("  · %s [%s] %s" % (mid, mem.get("layer"),
+                                          (mem.get("summary") or mem.get("content") or "")[:40]))
+        return 0
+
+    r = sleep(db, verbose=True)
+    return 0
+
+
+if __name__ == "__main__":
+    import sys
+
+    sys.exit(main())

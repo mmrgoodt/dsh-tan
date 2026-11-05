@@ -159,7 +159,7 @@ def send_feishu(text: str, webhook: str | None = None) -> bool:
     请求体：{"msg_type":"text","content":{"text":"..."}}
     成功判定：HTTP 200 且返回体里 code / StatusCode 为 0。
     """
-    webhook = (webhook if webhook is not None else os.environ.get("FEISHU_WEBHOOK") or "").strip()
+    webhook = (webhook if webhook is not None else _webhook()).strip()
     if not webhook:
         return False
 
@@ -462,6 +462,24 @@ def drain(raw: bool = False) -> int:
     return count
 
 
+
+def _webhook():
+    """飞书 webhook：先读 TAN_HOME/webhook.txt，再退回环境变量。
+
+    写文件而不是靠环境变量，是因为计划任务（schtasks）启动的进程
+    拿不到你在当前 shell 里 export 的东西 —— 之前那样配了也白配。
+    """
+    f = ROOT / "feishu_webhook.txt"
+    try:
+        if f.exists():
+            v = f.read_text(encoding="utf-8").strip()
+            if v:
+                return v
+    except Exception:
+        pass
+    return (os.environ.get("FEISHU_WEBHOOK") or "").strip()
+
+
 # ---------------------------------------------------------------- 投递编排
 
 def push(text: str, slot: str = "manual", title: str | None = None) -> dict:
@@ -476,7 +494,7 @@ def push(text: str, slot: str = "manual", title: str | None = None) -> dict:
     result = {"feishu": False, "windows": "", "queued": False, "channel": "queue"}
 
     # ① 飞书优先
-    hook = (os.environ.get("FEISHU_WEBHOOK") or "").strip()
+    hook = _webhook()
     if hook:
         result["feishu"] = send_feishu(text, hook)
         if result["feishu"]:

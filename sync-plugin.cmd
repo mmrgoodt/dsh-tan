@@ -15,8 +15,14 @@ if not exist "%DST%" (
 
 copy /Y "%SRC%\index.js" "%DST%\index.js" >nul || goto :fail
 copy /Y "%SRC%\memory-tools.js" "%DST%\memory-tools.js" >nul || goto :fail
+copy /Y "%SRC%\im-tools.js" "%DST%\im-tools.js" >nul || goto :fail
 
-echo synced: index.js memory-tools.js
+copy /Y "%SRC%\im-native.js" "%DST%\im-native.js" >nul || goto :fail
+copy /Y "%SRC%\qr.js" "%DST%\qr.js" >nul || goto :fail
+copy /Y "%SRC%\wx-loop.js" "%DST%\wx-loop.js" >nul || goto :fail
+copy /Y "%SRC%\..\optional\client.js" "%DST%\client.js" >nul || goto :fail
+
+echo synced: index.js memory-tools.js im-tools.js im-native.js qr.js wx-loop.js client.js
 exit /b 0
 
 :fail

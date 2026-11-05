@@ -1,5 +1,52 @@
 # 更新日志
 
+## v0.4.1 — 2026-11-05
+
+0.4.0 把底层换成了概念网络。这一版在它上面补三块：3D 视图、记忆的写/取/沉，还有通道和安装。
+
+### 3D 视图：canvas 手算投影 → three.js
+
+旧的 `visual/neuron3d.html` 547 行，canvas 2D 手工算投影，没有 WebGL、没有光照、没有后处理，看着只是「会转的点阵」。现在 1247 行，真 three.js：
+
+- **点**：ShaderMaterial + AdditiveBlending，核和晕分两段，再叠 EffectComposer → RenderPass → UnrealBloomPass(0.92 / 0.55 / 0.16) → OutputPass，ACES 色调映射
+- **边**：二次贝塞尔，每条切 10 段，控制点垂直偏 0.46×边长；720 个粒子沿曲线循环流动
+- **深度**：顶点着色器里点径 = `size×(H/2)/(tan(fov/2)×dist)`，再乘 `clamp(640/dist, 0.14, 1)` 的雾化 —— 远的小而且暗
+- **相机**：球坐标 + 指数阻尼（k = 1−e^−6.5dt），自转 0.105 rad/s，呼吸 ±3%，拖拽有惯性；点节点 1.25 秒 easeInOutCubic 飞过去
+- **布局**：按层分壳，L4/L5 在 0.10R、L3 0.40、L2 0.68、L2- 0.745、L1 0.96（R=300）。实测壳半径 24.6 / 36 / 121 / 205 / 226 / 287；同层同 thread 组内最大距离中位数 41.8，同层随机两点平均 359.7
+- **悬停聚焦**：焦点和邻居 o=1，其余压到 0.15（实测 3 个 1.00、416 个 0.15），焦点放大 2.4 倍，边和粒子一起压暗
+- **上限** 1200 点 / 3000 边 / 720 粒子，主体只有 3 个 draw
+- 接口挂了自动切 64 点演示图，右上角标「演示数据」，不弹错误页
+
+three.js r160 和 postprocessing 全部 vendored 进 `visual/vendor/three/`（11 个文件），离线能跑；`visual/neuron3d.legacy.html` 是回退备份。
+
+### 记忆：写入提炼 / 召回打分 / 真的沉降
+
+- **写入提炼**（新增 `hippocampus/distill.py`，纯规则）：按句末切句、按小句定性（lesson > preference > fact > process），只要一句里有小句属于前三类就整句原样留下来，不改写原话。实测「我修好了。/ 已经推送了。/ 一共做了四件事。」全丢，「这个配置我已经改成 8080 端口了。」留下
+- **冲突覆盖**：主题词重合 ≥2、新的 created 更晚、旧的非 pinned、且取值确实变了（路径/端口/版本）或同层态度相反 → 旧行标 `superseded` 并写 `superseded_by`，内容和 recall_count 都留着，能翻案
+- **召回打分**：`total = (0.15+rel) × decay × importance`。decay 用该条自己的 half_life_days，pinned/protected 直接 1.0；importance 叠层权重、pinned 1.25、protected 1.10、recall_count、last_recalled 新近、reject 罚、置信。每条挂 `score` 和 `score_parts`。和 0.4.0 的侧抑制是分工关系：侧抑制挑概念，rank_score 排记忆
+- **沉降真的执行了**：`settle()` 把 14 天没人碰、召回 ≤2、非 pinned/protected 的 active 转 dormant，只改状态不删，写一条 `events(kind='settle')` 留痕。接进 `sweep()` 第 ④ 步，也能手动 `python -m hippocampus.sleep --settle [--days N --dry-run -v]`
+
+### 通道与安装
+
+- **`/turn` 节流合并**：1.5 秒窗口内的多个 turn 合成一次提交，最多攒 5 条，user / assistant 各自按顺序用 `\n\n` 拼，session 取提交那刻的 id，turn 取最后一条。连发三条不再跑三轮；每个 agent 一个合并器，卸载时 flush 残留。`scripts/throttle-test.mjs` 覆盖了窗口合并 / 攒满立即发 / dispose 兜底 / 抛异常不炸四种情况
+- **安装可以直连**：`install.py --link` 建目录联结点，改 `plugin/` 源码不用再跑同步脚本；`--copy` 强制复制；默认先试 junction，失败自动回退并打印实际用了哪种。`--panel` 仍走复制（junction 会把 client.js 写进源码 lib）
+- **修了一个会装坏的问题**：复制模式原来只复制 index.js + client.js，而 index.js 现在还 import memory-tools / im-native / wx-loop / qr / im-tools，装完缺模块一加载就 ENOENT。现在复制整个 `lib/*.js`
+- **卸载安全**：删安装目录前先看 reparse point，是 junction 就 `os.rmdir` 只摘链接，绝不 `rmtree` —— 那会顺着链接把 `D:\dsh-tan\plugin` 一起删
+
+### 静态资源与鉴权
+
+`api.py` 的静态路由支持 `vendor/` 下多级路径（逐段白名单，挡 `..` 和怪字符），`/vendor/` 前缀免 token，浏览器才加载得了 three.js。实测 `/vendor/../../api.py`、`%2e%2e` 全部 404。
+
+### 安全
+
+新增 `python install.py --harden`：飞书 bot 目录、`state.json`、`tan\token.txt` 断继承，只留 admin 和 SYSTEM，踢掉 Users / Everyone / Authenticated Users，可重复执行。
+
+### 顺带修的
+
+本来就红的 9 个测试，根因不是一处：真正拦语句的是 `gate.should_keep`（`detect_noise` 也有份）、`persona.prompt_block` 少了「## 我是谁」和「底色：」两行、`prepare_context` 多出 `ids` 让断言对不上。现在 `pytest tests -q` 是 **107 passed**。
+
+---
+
 ## v0.4.0 — 2026-11-05
 
 这一版动了底层。之前所有的版本本质都是 grep：句子存进去，查询拆词，

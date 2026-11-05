@@ -146,6 +146,13 @@ def clip_content(text, limit=MAX_CONTENT):
     return cut.rstrip()[:max(1, limit - 1)] + "…"
 
 
+_STATEMENT_RE = re.compile(
+    r"(我在|我正在|我是|我的|我做|我弄|我写|我们从|我们用|已经|改成|换成|用的|用的是|"
+    r"在做|在写|在弄|在改|跑在|存在|放在|保存在|装在|"
+    r"路径|目录|端口|版本|配置|项目|插件|字段|接口|地址|域名|密码|账号)"
+)
+
+
 def detect_noise(text: str) -> bool:
     """判断是不是没营养的闲聊"""
     t = _clean(text)
@@ -153,6 +160,11 @@ def detect_noise(text: str) -> bool:
         return True
     if re.fullmatch(r"[嗯哦啊哈好的行对是嗯嗯哦哦okOK，。！？\s]+", t):
         return True
+    # 陈述句：说的是「我在做什么 / 东西在哪 / 已经是多少」。短，但是事实。
+    # 只按长度卡（<10 字算闲聊）会把「我在做一个记忆插件」9 个字直接扔掉，
+    # 一条真事就这么没了 —— 所以先看句式，再看长度。
+    if _STATEMENT_RE.search(t) or re.search(r"\d", t):
+        return False
     if len(t) < 10 and not any(k in t for k in ("？", "?", "改", "加", "弄", "查")):
         return True
     return False

@@ -1,6 +1,6 @@
 # Tan · 记忆插件
 
-`v0.4.0` · `MIT` · `Python 3.10+` · `Windows / macOS / Linux` · [更新日志](CHANGELOG.md)
+`v0.4.1` · `MIT` · `Python 3.10+` · `Windows / macOS / Linux` · [更新日志](CHANGELOG.md)
 
 > 给 AI 装一个会遗忘、会沉淀、有性格的记忆
 >
@@ -25,7 +25,7 @@
 
 ### 方式一：下载压缩包（推荐，最简单）
 
-1. 打开 [Releases](https://github.com/mmrgoodt/dsh-tan/releases)，下载最新的 `dsh-tan-v0.3.2.zip`（11 MB）
+1. 打开 [Releases](https://github.com/mmrgoodt/dsh-tan/releases)，下载最新的 `dsh-tan-v0.4.1.zip`（11 MB）
 2. 解压到任意目录（路径最好不带中文）
 3. 双击 `一键安装.bat`
 4. 按提示重启 DSH（托盘图标右键 → 退出 → 重新打开）
@@ -44,6 +44,18 @@ python api.py                  # 手动起服务
 ```
 
 需要自己装 Python 3.10+。
+
+安装模式顺带说一下：默认 **先试目录联结点（junction），失败自动回退复制**。
+联结点模式下 `~/.dsh/profiles/desktop/node_modules/dsh-tan` 直接指向 `D:\dsh-tan\plugin`，
+以后改源码不用再跑 `sync-plugin.cmd`，重启 DSH 就生效（建 junction 要管理员权限或开发者模式）。
+
+```bash
+python install.py --link       # 强制联结点（建不上就报错，不偷偷回退）
+python install.py --copy       # 强制复制（就是以前的老行为）
+python install.py --status     # 看现在装的是哪一种
+```
+
+`--panel` 只会走复制模式：联结点会把 `client.js` 写进源码目录，还会改到源码的 `package.json`。
 
 ### 关于 npm
 
@@ -201,6 +213,28 @@ Cookie: tan_token=<token>
 
 **它挡住的是**：浏览器里其他网页偷偷调 `localhost:18765` 读你的记忆
 **它挡不住**：本机上有文件读权限的程序（能直接读 token.txt）
+
+### 明文 token 存在哪 / 权限
+
+下面这几个文件里是**明文**凭据，谁读到就等于拿到钥匙：
+
+- `~/.dsh/tan/token.txt` —— tan 自己 api 的访问令牌
+- `~/.dsh/integrations/dsh-feishu/bots/<bot_id>/state.json` —— 飞书机器人的 app secret / token
+
+已经做过权限收紧：把这两个文件和所在目录的**继承权限断开**，只留当前用户（`admin`）
+和 `SYSTEM` 的完全控制，`Users` / `Everyone` / `Authenticated Users` 全部移除。
+换个账户登录这台机器就读不到了。
+
+要重新收紧（换机器、重装、或者手滑动过权限之后）：
+
+```bash
+python install.py --harden
+```
+
+可以反复跑，每次都会把 `icacls` 调整前 / 调整后的权限清单打出来对比。
+
+> 想更安全就换成系统凭据管理器（Windows Credential Manager / DPAPI 加密存盘），
+> 那样才算真的不落明文 —— 现在这步只是把文件锁起来。
 
 ---
 

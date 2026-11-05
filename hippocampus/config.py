@@ -73,6 +73,13 @@ DORMANT_DECAY = 0.05        # 低于此值转 dormant
 NOISE_ARCHIVE_DAYS = 3
 SUNSET_DAYS = 90            # 90 天未召回视为沉睡
 
+# ---------- 沉降（settle） ----------
+# 遗忘以前只有参数没有任务，从来不真发生。沉降是把「老 + 没人碰」的记忆
+# 从 active 改 dormant（不删），把注入预算让给还活着的事。
+SETTLE_DAYS = 14            # N 天：created 超过 N 天，且 last_recalled 为空或也超过 N 天
+SETTLE_MAX_RECALL = 2       # 召回次数 ≤ 这个数才算「没人用」
+SETTLE_BATCH = 2000         # 一次最多扫多少条，防止大库卡住
+
 # ---------- Open Loops ----------
 LOOP_COOLDOWN_HOURS = 24
 LOOPS_PER_TURN = 1

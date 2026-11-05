@@ -1,0 +1,547 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Hippocampus · 记忆神经元 3D</title>
+<style>
+  * { margin:0; padding:0; box-sizing:border-box; }
+  html,body { height:100%; background:#05070b; overflow:hidden;
+    font-family:"Segoe UI","Microsoft YaHei UI",system-ui,sans-serif; color:#e6edf3; }
+  #stage { position:fixed; inset:0; display:block; cursor:grab; touch-action:none; }
+  #stage.drag { cursor:grabbing; }
+
+  .panel { position:fixed; z-index:10; background:rgba(10,14,20,.72);
+    border:1px solid rgba(48,54,61,.75); border-radius:10px; padding:11px 14px;
+    backdrop-filter:blur(8px); -webkit-backdrop-filter:blur(8px);
+    box-shadow:0 10px 34px rgba(0,0,0,.55); user-select:none; pointer-events:none; }
+
+  #hud { left:16px; top:16px; min-width:200px; }
+  #hud h1 { font-size:14px; font-weight:600; color:#58a6ff; letter-spacing:.6px; margin-bottom:8px; }
+  #hud .row { display:flex; justify-content:space-between; font-size:11.5px; color:#8b949e; margin:4px 0; }
+  #hud .row b { color:#e6edf3; font-weight:600; }
+  #dot { display:inline-block; width:7px; height:7px; border-radius:50%; background:#8b949e;
+    box-shadow:0 0 8px currentColor; margin-right:6px; transition:.25s; }
+  #dot.on { background:#3fb950; color:#3fb950; }
+
+  #legend { right:16px; bottom:16px; font-size:11px; color:#8b949e; }
+  #legend .l { display:flex; align-items:center; gap:8px; margin:5px 0; }
+  #legend i { width:9px; height:9px; border-radius:50%; display:inline-block; }
+
+  #help { left:50%; bottom:16px; transform:translateX(-50%); font-size:11px; color:#6e7681;
+    background:rgba(10,14,20,.6); padding:7px 16px; border-radius:20px;
+    border:1px solid rgba(48,54,61,.5); }
+  #help kbd { background:#161b22; border:1px solid #30363d; border-radius:4px; padding:1px 5px;
+    font-size:10px; color:#8b949e; font-family:inherit; }
+
+  #tip { position:fixed; z-index:20; display:none; pointer-events:none;
+    background:rgba(13,17,23,.96); border:1px solid #30363d; border-radius:8px;
+    padding:9px 12px; font-size:11.5px; line-height:1.65; max-width:300px;
+    box-shadow:0 8px 30px rgba(0,0,0,.6); }
+  #tip .t { color:#e6edf3; margin-bottom:5px; font-weight:600; }
+  #tip .m { color:#8b949e; }
+  #tip .bar { height:3px; border-radius:2px; margin-top:6px; background:#21262d; overflow:hidden; }
+  #tip .bar > i { display:block; height:100%; border-radius:2px; }
+
+  #err { position:fixed; inset:0; display:none; align-items:center; justify-content:center;
+    flex-direction:column; gap:14px; font-size:14px; color:#f85149; text-align:center; z-index:30; }
+  #err code { background:#161b22; padding:4px 10px; border-radius:5px; color:#58a6ff; font-size:13px; }
+</style>
+</head>
+<body>
+<canvas id="stage"></canvas>
+
+<div id="hud" class="panel">
+  <h1>记忆神经元 · 3D</h1>
+  <div class="row"><span><span id="dot"></span>状态</span><b id="state">连接中…</b></div>
+  <div class="row"><span>节点</span><b id="nCount">0</b></div>
+  <div class="row"><span>突触</span><b id="eCount">0</b></div>
+  <div class="row"><span>记忆条数</span><b id="mCount">0</b></div>
+  <div class="row"><span>更新</span><b id="clock">--:--:--</b></div>
+</div>
+
+<div id="legend" class="panel">
+  <div class="l"><i style="background:#f5c850"></i>身份 / 自我</div>
+  <div class="l"><i style="background:#48c774"></i>方法</div>
+  <div class="l"><i style="background:#58a6ff"></i>事实</div>
+  <div class="l"><i style="background:#f85149"></i>教训</div>
+  <div class="l"><i style="background:#d29922"></i>情景</div>
+</div>
+
+<div id="help" class="panel">
+  <kbd>拖动</kbd> 旋转 · <kbd>滚轮</kbd> 缩放 · <kbd>双击</kbd> 复位 · <kbd>空格</kbd> 暂停旋转
+</div>
+
+<div id="tip"></div>
+
+<div id="err">
+  <div>记忆服务未启动</div>
+  <div><code>python api.py</code></div>
+</div>
+
+<script>
+"use strict";
+
+/* ============================================================
+   配置
+   ============================================================ */
+const API = "http://127.0.0.1:18765";
+const COLORS = { L4:"#f5c850", L5:"#f5c850", L3:"#48c774", L2:"#58a6ff", "L2-":"#f85149", L1:"#d29922" };
+const LABELS = { L4:"身份", L5:"自我", L3:"方法", L2:"事实", "L2-":"教训", L1:"情景" };
+
+const CFG = {
+  repulse: 26000,      // 3D 斥力系数
+  spring: 0.020,
+  springLen: 105,
+  damping: 0.86,
+  centerPull: 0.0052,
+  maxSpeed: 6,
+  fov: 900,            // 透视焦距
+  minZoom: 0.25,
+  maxZoom: 3.2,
+  autoRotate: 0.0016,  // 每帧弧度
+  refreshMs: 5000,
+};
+
+/* ============================================================
+   画布
+   ============================================================ */
+const cvs = document.getElementById("stage");
+const ctx = cvs.getContext("2d", { alpha: false });
+let W = 0, H = 0, DPR = Math.min(window.devicePixelRatio || 1, 2);
+
+function resize() {
+  W = window.innerWidth; H = window.innerHeight;
+  cvs.width = Math.round(W * DPR); cvs.height = Math.round(H * DPR);
+  cvs.style.width = W + "px"; cvs.style.height = H + "px";
+  ctx.setTransform(DPR, 0, 0, DPR, 0, 0);
+}
+window.addEventListener("resize", resize);
+resize();
+
+/* ============================================================
+   数据
+   ============================================================ */
+let nodes = [];          // {id,layer,label,weight,r, x,y,z, vx,vy,vz, alpha, isNew}
+let edges = [];          // {a,b,type}
+let stats = { memories: 0 };
+
+let cam = { rx: -0.18, ry: 0.35, zoom: 1, panX: 0, panY: 0 };
+let autoSpin = true;
+let hoverNode = null;
+let dragMode = null;     // "rotate" | "pan"
+let last = { x: 0, y: 0 };
+let mouse = { x: -999, y: -999 };
+
+/* ============================================================
+   拉数据
+   ============================================================ */
+async function load() {
+  try {
+    const g = await fetchJson("/graph");
+    applyGraph(g);
+    const s = await fetchJson("/status");
+    if (s) stats = s;
+    setState(true);
+  } catch {
+    setState(false);
+  }
+  document.getElementById("clock").textContent =
+    new Date().toLocaleTimeString("zh-CN", { hour12: false });
+}
+
+async function fetchJson(path) {
+  const ac = new AbortController();
+  const t = setTimeout(() => ac.abort(), 3000);
+  try {
+    const r = await fetch(API + path, { signal: ac.signal, cache: "no-store", headers: { "X-Tan-Source": "dsh-plugin" } });
+    if (!r.ok) throw new Error("bad");
+    return await r.json();
+  } finally {
+    clearTimeout(t);
+  }
+}
+
+function setState(ok) {
+  document.getElementById("state").textContent = ok ? "已连接" : "未连接";
+  document.getElementById("dot").className = ok ? "on" : "";
+  document.getElementById("err").style.display = ok ? "none" : "flex";
+}
+
+function applyGraph(data) {
+  const old = new Map(nodes.map(n => [n.id, n]));
+  const next = [];
+
+  for (const raw of (data.nodes || [])) {
+    const prev = old.get(raw.id);
+    const r = 5.5 + Math.min(14, (raw.weight || 0) * 2.8);
+
+    if (prev) {
+      next.push(Object.assign(prev, raw, { r, layer: raw.layer }));
+    } else {
+      // 新节点：球面随机出生
+      const theta = Math.random() * Math.PI * 2;
+      const phi = Math.acos(2 * Math.random() - 1);
+      const rad = 90 + Math.random() * 130;
+      next.push(Object.assign({}, raw, {
+        r, x: Math.sin(phi) * Math.cos(theta) * rad,
+        y: Math.sin(phi) * Math.sin(theta) * rad,
+        z: Math.cos(phi) * rad,
+        vx: 0, vy: 0, vz: 0, alpha: 0, isNew: true,
+      }));
+    }
+  }
+  nodes = next;
+
+  const idx = new Map(nodes.map(n => [n.id, n]));
+  edges = [];
+  const seen = new Set();
+  for (const e of (data.edges || [])) {
+    const a = idx.get(e.source_id || e.source);
+    const b = idx.get(e.target_id || e.target);
+    if (!a || !b || a === b) continue;
+    const key = a.id < b.id ? a.id + "|" + b.id : b.id + "|" + a.id;
+    if (seen.has(key)) continue;
+    seen.add(key);
+    edges.push({ a, b, type: e.edge_type || e.type || "link" });
+  }
+
+  document.getElementById("nCount").textContent = nodes.length;
+  document.getElementById("eCount").textContent = edges.length;
+  document.getElementById("mCount").textContent = stats.memories || nodes.length;
+}
+
+/* ============================================================
+   3D 物理
+   ============================================================ */
+function physics() {
+  const n = nodes.length;
+  if (!n) return;
+
+  // 斥力（3D）
+  for (let i = 0; i < n; i++) {
+    const a = nodes[i];
+    for (let j = i + 1; j < n; j++) {
+      const b = nodes[j];
+      let dx = a.x - b.x, dy = a.y - b.y, dz = a.z - b.z;
+      let d2 = dx * dx + dy * dy + dz * dz;
+      if (d2 < 1) { dx = Math.random() - .5; dy = Math.random() - .5; dz = Math.random() - .5; d2 = 1; }
+      const d = Math.sqrt(d2);
+      const f = Math.min(60, CFG.repulse / d2) / d;
+      a.vx += dx * f; a.vy += dy * f; a.vz += dz * f;
+      b.vx -= dx * f; b.vy -= dy * f; b.vz -= dz * f;
+    }
+  }
+
+  // 弹簧（3D）
+  for (const e of edges) {
+    const dx = e.b.x - e.a.x, dy = e.b.y - e.a.y, dz = e.b.z - e.a.z;
+    const d = Math.sqrt(dx * dx + dy * dy + dz * dz) || 1;
+    const f = (d - CFG.springLen) * CFG.spring;
+    const ux = dx / d, uy = dy / d, uz = dz / d;
+    e.a.vx += ux * f; e.a.vy += uy * f; e.a.vz += uz * f;
+    e.b.vx -= ux * f; e.b.vy -= uy * f; e.b.vz -= uz * f;
+  }
+
+  // 向心 + 阻尼 + 积分
+  for (const nd of nodes) {
+    nd.vx -= nd.x * CFG.centerPull;
+    nd.vy -= nd.y * CFG.centerPull;
+    nd.vz -= nd.z * CFG.centerPull;
+
+    nd.vx *= CFG.damping; nd.vy *= CFG.damping; nd.vz *= CFG.damping;
+
+    const sp = Math.hypot(nd.vx, nd.vy, nd.vz);
+    if (sp > CFG.maxSpeed) {
+      const k = CFG.maxSpeed / sp;
+      nd.vx *= k; nd.vy *= k; nd.vz *= k;
+    }
+    nd.x += nd.vx; nd.y += nd.vy; nd.z += nd.vz;
+
+    if (nd.isNew) {
+      nd.alpha = Math.min(1, (nd.alpha || 0) + 0.035);
+      if (nd.alpha >= 1) delete nd.isNew;
+    } else {
+      nd.alpha = Math.min(1, (nd.alpha || 0) + 0.07);
+    }
+  }
+}
+
+/* ============================================================
+   相机 / 投影
+   ============================================================ */
+function project(x, y, z) {
+  // 先绕 Y 轴（水平旋转），再绕 X 轴（俯仰）
+  const cy = Math.cos(cam.ry), sy = Math.sin(cam.ry);
+  let x1 = x * cy + z * sy;
+  let z1 = -x * sy + z * cy;
+
+  const cx = Math.cos(cam.rx), sx = Math.sin(cam.rx);
+  let y1 = y * cx - z1 * sx;
+  let z2 = y * sx + z1 * cx;
+
+  const depth = z2 + 900;                    // 相机距离
+  if (depth <= 60) return null;              // 太近，裁掉
+
+  const scale = (CFG.fov / depth) * cam.zoom;
+  return {
+    sx: W / 2 + x1 * scale + cam.panX,
+    sy: H / 2 + y1 * scale + cam.panY,
+    scale,
+    depth,
+    z: z2,
+  };
+}
+
+/* ============================================================
+   渲染
+   ============================================================ */
+function hexToRgb(hex) {
+  const v = parseInt(hex.slice(1), 16);
+  return [(v >> 16) & 255, (v >> 8) & 255, v & 255];
+}
+
+function draw() {
+  // 背景
+  ctx.fillStyle = "#05070b";
+  ctx.fillRect(0, 0, W, H);
+
+  const g = ctx.createRadialGradient(W / 2, H / 2, 40, W / 2, H / 2, Math.max(W, H) * .62);
+  g.addColorStop(0, "rgba(30,52,88,0.30)");
+  g.addColorStop(.55, "rgba(16,26,44,0.12)");
+  g.addColorStop(1, "rgba(5,7,11,0)");
+  ctx.fillStyle = g;
+  ctx.fillRect(0, 0, W, H);
+
+  // 投影所有节点
+  const proj = [];
+  for (const nd of nodes) {
+    const p = project(nd.x, nd.y, nd.z);
+    if (!p) continue;
+    proj.push({ nd, p });
+  }
+  // 远 → 近
+  proj.sort((a, b) => b.p.depth - a.p.depth);
+
+  const map = new Map(proj.map(o => [o.nd.id, o]));
+
+  // 连线
+  ctx.lineCap = "round";
+  for (const e of edges) {
+    const A = map.get(e.a.id), B = map.get(e.b.id);
+    if (!A || !B) continue;
+
+    const avgDepth = (A.p.depth + B.p.depth) / 2;
+    const fog = Math.max(0.05, Math.min(1, 900 / avgDepth));
+    const isThread = e.type === "thread";
+    const isEntity = e.type === "entity";
+
+    const baseA = isThread ? 0.30 : (isEntity ? 0.22 : 0.14);
+    const alpha = baseA * fog * Math.min(A.nd.alpha, B.nd.alpha);
+    const lw = Math.max(0.35, 1.4 * fog * ((A.p.scale + B.p.scale) / 2) * 1.6);
+
+    // 渐变连线
+    const grad = ctx.createLinearGradient(A.p.sx, A.p.sy, B.p.sx, B.p.sy);
+    const ca = isThread ? "88,166,255" : (isEntity ? "140,180,255" : "139,148,158");
+    grad.addColorStop(0, `rgba(${ca},${alpha})`);
+    grad.addColorStop(1, `rgba(${ca},${alpha * 0.55})`);
+
+    ctx.strokeStyle = grad;
+    ctx.lineWidth = lw;
+    ctx.beginPath();
+    ctx.moveTo(A.p.sx, A.p.sy);
+    ctx.lineTo(B.p.sx, B.p.sy);
+    ctx.stroke();
+  }
+
+  // 节点（远 → 近）
+  for (const { nd, p } of proj) {
+    const base = COLORS[nd.layer] || "#8b949e";
+    const [r, g2, b] = hexToRgb(base);
+    const fog = Math.max(0.15, Math.min(1, 850 / p.depth));
+    const a = (nd.alpha || 0) * fog;
+    const radius = Math.max(1.2, nd.r * p.scale * 1.15);
+
+    const heat = Math.min(1, (nd.weight || 0) / 8);
+    const glowK = 1 + heat * 0.85;
+
+    // 外层光晕
+    for (const [mult, alpha] of [[4.2, 0.035], [2.8, 0.06], [1.9, 0.11], [1.35, 0.19]]) {
+      ctx.beginPath();
+      ctx.arc(p.sx, p.sy, radius * mult * glowK, 0, Math.PI * 2);
+      ctx.fillStyle = `rgba(${r},${g2},${b},${alpha * a})`;
+      ctx.fill();
+    }
+
+    // 核心
+    const core = ctx.createRadialGradient(
+      p.sx - radius * .3, p.sy - radius * .3, radius * .1,
+      p.sx, p.sy, radius
+    );
+    core.addColorStop(0, `rgba(255,255,255,${0.92 * a})`);
+    core.addColorStop(.35, `rgba(${r},${g2},${b},${0.95 * a})`);
+    core.addColorStop(1, `rgba(${Math.max(0, r - 60)},${Math.max(0, g2 - 60)},${Math.max(0, b - 60)},${0.85 * a})`);
+    ctx.beginPath();
+    ctx.arc(p.sx, p.sy, radius, 0, Math.PI * 2);
+    ctx.fillStyle = core;
+    ctx.fill();
+
+    // 悬停高亮
+    if (hoverNode && hoverNode.id === nd.id) {
+      ctx.beginPath();
+      ctx.arc(p.sx, p.sy, radius * 1.9, 0, Math.PI * 2);
+      ctx.strokeStyle = `rgba(255,255,255,${0.55 * a})`;
+      ctx.lineWidth = 1.6;
+      ctx.stroke();
+    }
+
+    // 标签（近处才显示）
+    if (p.depth < 780 && radius > 3) {
+      const txt = (nd.label || "").slice(0, 13);
+      const fs = Math.max(9, Math.min(13, 10.5 * p.scale * 1.5));
+      ctx.font = `${fs}px "Microsoft YaHei UI", sans-serif`;
+      ctx.textAlign = "center";
+      ctx.textBaseline = "top";
+      const tw = ctx.measureText(txt).width;
+      const ty = p.sy + radius + 6;
+      const la = a * 0.92;
+
+      ctx.fillStyle = `rgba(6,10,16,${0.72 * la})`;
+      roundRect(p.sx - tw / 2 - 5, ty - 2, tw + 10, fs + 6, 4);
+      ctx.fill();
+
+      ctx.fillStyle = `rgba(226,233,240,${la})`;
+      ctx.fillText(txt, p.sx, ty);
+      ctx.textBaseline = "alphabetic";
+    }
+
+    nd._screen = { x: p.sx, y: p.sy, r: radius, a };
+  }
+}
+
+function roundRect(x, y, w, h, r) {
+  ctx.beginPath();
+  ctx.moveTo(x + r, y);
+  ctx.arcTo(x + w, y, x + w, y + h, r);
+  ctx.arcTo(x + w, y + h, x, y + h, r);
+  ctx.arcTo(x, y + h, x, y, r);
+  ctx.arcTo(x, y, x + w, y, r);
+  ctx.closePath();
+}
+
+/* ============================================================
+   主循环
+   ============================================================ */
+let lastT = performance.now();
+function frame(t) {
+  const dt = Math.min(50, t - lastT);
+  lastT = t;
+
+  if (autoSpin && !dragMode) {
+    cam.ry += CFG.autoRotate * (dt / 16.7);
+  }
+
+  physics();
+  draw();
+
+  requestAnimationFrame(frame);
+}
+
+/* ============================================================
+   交互
+   ============================================================ */
+function pickNode(mx, my) {
+  let best = null, bestD = 1e9;
+  for (const nd of nodes) {
+    if (!nd._screen) continue;
+    const d = Math.hypot(nd._screen.x - mx, nd._screen.y - my);
+    if (d < nd._screen.r + 12 && d < bestD) { best = nd; bestD = d; }
+  }
+  return best;
+}
+
+cvs.addEventListener("pointerdown", (e) => {
+  cvs.setPointerCapture(e.pointerId);
+  cvs.classList.add("drag");
+  const n = pickNode(e.clientX, e.clientY);
+  if (n) {
+    dragMode = "pan";
+  } else {
+    dragMode = "rotate";
+  }
+  last = { x: e.clientX, y: e.clientY };
+});
+
+cvs.addEventListener("pointermove", (e) => {
+  mouse = { x: e.clientX, y: e.clientY };
+
+  if (dragMode === "rotate") {
+    cam.ry += (e.clientX - last.x) * 0.006;
+    cam.rx += (e.clientY - last.y) * 0.005;
+    cam.rx = Math.max(-1.45, Math.min(1.45, cam.rx));
+    last = { x: e.clientX, y: e.clientY };
+    document.getElementById("tip").style.display = "none";
+    return;
+  }
+  if (dragMode === "pan") {
+    cam.panX += e.clientX - last.x;
+    cam.panY += e.clientY - last.y;
+    last = { x: e.clientX, y: e.clientY };
+    return;
+  }
+
+  // 悬停
+  const n = pickNode(e.clientX, e.clientY);
+  hoverNode = n;
+  const tip = document.getElementById("tip");
+  if (n) {
+    const color = COLORS[n.layer] || "#8b949e";
+    const pct = Math.min(100, (n.weight || 0) * 12);
+    tip.style.display = "block";
+    tip.style.left = Math.min(e.clientX + 18, W - 320) + "px";
+    tip.style.top = Math.min(e.clientY + 18, H - 140) + "px";
+    tip.innerHTML =
+      `<div class="t">${esc(n.label || "")}</div>` +
+      `<div class="m">${LABELS[n.layer] || n.layer} · ${n.age_days ?? "?"} 天前</div>` +
+      `<div class="m">被用到 ${n.weight || 0} 次</div>` +
+      `<div class="bar"><i style="width:${pct}%;background:${color}"></i></div>`;
+  } else {
+    tip.style.display = "none";
+  }
+});
+
+window.addEventListener("pointerup", () => {
+  dragMode = null;
+  cvs.classList.remove("drag");
+});
+
+cvs.addEventListener("wheel", (e) => {
+  e.preventDefault();
+  const k = e.deltaY < 0 ? 1.08 : 0.926;
+  cam.zoom = Math.max(CFG.minZoom, Math.min(CFG.maxZoom, cam.zoom * k));
+}, { passive: false });
+
+cvs.addEventListener("dblclick", () => {
+  cam.rx = -0.18; cam.ry = 0.35; cam.zoom = 1; cam.panX = 0; cam.panY = 0;
+});
+
+window.addEventListener("keydown", (e) => {
+  if (e.code === "Space") {
+    e.preventDefault();
+    autoSpin = !autoSpin;
+  }
+});
+
+function esc(s) {
+  return String(s).replace(/[&<>"]/g, c => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" }[c]));
+}
+
+/* ============================================================
+   启动
+   ============================================================ */
+load();
+setInterval(load, CFG.refreshMs);
+requestAnimationFrame(frame);
+</script>
+</body>
+</html>
