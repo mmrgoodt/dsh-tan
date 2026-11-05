@@ -111,7 +111,11 @@ def discover(db):
         out.append((score, c, e))
     out.sort(reverse=True)
 
-    db.execute("DELETE FROM aliases")
+    # 只清「统计推出来」的别名（score < 7）。手写种子是 9.0、
+    # synonyms.install() 装的人工同义词是 7.0，这两类必须留着 ——
+    # 原来这里是无条件 DELETE FROM aliases，跑一次 discover 就把
+    # 900 多对人工同义词全冲掉了。
+    db.execute("DELETE FROM aliases WHERE score < 7.0")
     written = 0
     with db.conn() as con:
         for c, e in SEED:

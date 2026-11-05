@@ -1,6 +1,6 @@
 # Tan · 记忆插件
 
-`v0.4.1` · `MIT` · `Python 3.10+` · `Windows / macOS / Linux` · [更新日志](CHANGELOG.md)
+`v0.5.0` · `MIT` · `Python 3.10+` · `Windows / macOS / Linux` · [更新日志](CHANGELOG.md)
 
 > 给 AI 装一个会遗忘、会沉淀、有性格的记忆
 >
@@ -25,7 +25,7 @@
 
 ### 方式一：下载压缩包（推荐，最简单）
 
-1. 打开 [Releases](https://github.com/mmrgoodt/dsh-tan/releases)，下载最新的 `dsh-tan-v0.4.1.zip`（11 MB）
+1. 打开 [Releases](https://github.com/mmrgoodt/dsh-tan/releases)，下载最新的 `dsh-tan-v0.5.0.zip`（11 MB）
 2. 解压到任意目录（路径最好不带中文）
 3. 双击 `一键安装.bat`
 4. 按提示重启 DSH（托盘图标右键 → 退出 → 重新打开）

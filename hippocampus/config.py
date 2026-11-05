@@ -65,6 +65,33 @@ INJECT_IDENTITY_QUOTA = 0 # 身份层固定名额。0 = 完全按相关度，不
 RECALL_CANDIDATES = 10   # 候选越多，装进正文的噪音越多
 INJECT_TOP_N = 8
 
+# ---------- 意图检索（抽象问句） ----------
+# 人问「某类事」，库里存「具体事」，词面对不上。retriever 按意图换一条检索路径，
+# 把这些补充候选和词面结果合并去重后再一起排序。
+INTENT_ENABLED = True
+INTENT_SUPPLEMENT_MAX = 6      # 一条查询最多补几条意图候选（多类合并后的总上限）
+INTENT_REL_FLOOR = 0.30        # 补充进来的记忆给个相关度地板，否则 rel=0 直接被门槛筛掉
+INTENT_REL_CAP = 0.45          # 地板也有上限：不能反客为主压过真正的字面命中
+INTENT_MERGE_RATIO = 0.95      # 合并排序时，补充候选的总分最多到「最好的词面命中」的 95%
+INTENT_LIST_EXTRA = 6          # 清单型（都 / 哪些 / 有什么）多给几条候选
+
+# ---------- 检索缓存（把 /context 压到几十毫秒） ----------
+TOKENIZE_CACHE = 512           # 分词结果按 query 缓存
+JSON_CACHE = 8192              # 记忆里 entities / provenance 的 json.loads 缓存
+IDF_CACHE = 4096               # 每个词的 df（出现它的记忆条数）
+CORTEX_CACHE_TTL = 90.0        # 概念激活结果的短时缓存（秒）；有写入时立刻作废
+CORTEX_CACHE_SIZE = 64
+
+# ---------- 检索用索引 ----------
+# 由 Retriever 初始化时补上（CREATE INDEX IF NOT EXISTS，幂等）。
+# 这三条是 EXPLAIN QUERY PLAN 实测出来的：edges 的邻居查询原本是 SCAN edges，
+# events 的「今天提过归纳没有」原本也是整表扫。
+EXTRA_INDEXES = (
+    "CREATE INDEX IF NOT EXISTS idx_edges_src ON edges(source_id)",
+    "CREATE INDEX IF NOT EXISTS idx_edges_tgt ON edges(target_id)",
+    "CREATE INDEX IF NOT EXISTS idx_events_kind_ts ON events(kind, ts)",
+)
+
 # ---------- 遗忘 ----------
 REINFORCE_FACTOR = 1.8      # 每次被用，半衰期 ×1.8
 REJECT_FACTOR = 0.5         # 被否定，半衰期 ×0.5

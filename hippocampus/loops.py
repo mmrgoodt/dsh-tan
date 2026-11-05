@@ -13,6 +13,39 @@ KIND_LABEL = {
     "known_issue": "已知问题",
 }
 
+# ---------- 噪音判定：AI 的回答正文被整段当成了待办 ----------
+# 抽取侧不看说话人，我回一大段话时，开头那句常被写成 todo，
+# 然后每轮都去「提醒」他一件根本没答应过的事。
+#
+# 这里只拦**强信号**，判得比 scripts/cleanup_dead_data.py 的批量清理松：
+# 「我明天还得看下报表」是用户亲口的承诺，也以「我」开头，
+# 运行时误伤一条真待办，比漏掉十条噪音的代价大。
+NOISE_MARKS = ("##", "|", "✅", "**", "```", "——")
+NOISE_HEADS = ("已", "这轮", "刚才", "下面", "关键", "Background", "subagent", "Task")
+NOISE_MAX_LEN = 60
+# 「真待办」长什么样：对着我说的请求，或者他还没做完的事。
+# 注意别把「改完了/做完了」算进来 —— 那是**我**在汇报进度，正是噪音的特征。
+REAL_TODO = ("帮我", "帮忙", "给我", "你去", "你帮", "记得", "明天", "下次",
+             "回头", "得看", "还得", "要不要", "待会", "等我")
+
+
+def is_noise_title(title):
+    """标题像不像 AI 的正文（而不是一件真待办）"""
+    t = (title or "").strip()
+    if not t:
+        return False
+    if any(k in t for k in REAL_TODO):        # 先认「真待办」的信号
+        return False
+    if len(t) > NOISE_MAX_LEN:
+        return True
+    if any(k in t for k in NOISE_MARKS):      # 带排版符号的必然是我写的正文
+        return True
+    if t.startswith(NOISE_HEADS):
+        return True
+    if t.startswith("我") and ("：" in t or len(t) > 30):
+        return True
+    return False
+
 
 class Loops:
     def __init__(self, db):
@@ -34,6 +67,9 @@ class Loops:
         for lp in loops:
             # 冷却：提过 24h 内不再提
             if lp["last_asked"] and (now - lp["last_asked"]) / 3600 < config.LOOP_COOLDOWN_HOURS:
+                continue
+            # 噪音：AI 正文冒充的待办，永远不提（真待办不受影响）
+            if is_noise_title(lp["title"]):
                 continue
             # 相关度：标题/详情与当前输入有共同字
             rel = 0.0
