@@ -29,6 +29,7 @@
 """
 import json
 import os
+import re
 import secrets
 import threading
 import time
@@ -37,8 +38,11 @@ from urllib.parse import urlparse, parse_qs
 
 from hippocampus import Hippocampus, config
 from hippocampus import backup as hip_backup
+from hippocampus.retriever import tokenize
+from hippocampus.atomic import AtomicWriter
 
 H = Hippocampus()
+ATOMIC = AtomicWriter(H.db)
 LOCK = threading.Lock()
 HERE = os.path.dirname(os.path.abspath(__file__))
 CONFIG_FILE = config.ROOT / "config.json"
@@ -198,6 +202,72 @@ def serve_static(handler, name):
     handler.send_header("Cache-Control", "no-cache")
     handler.end_headers()
     handler.wfile.write(body)
+
+
+# ==================== 查询净化 + 强化回写 ====================
+# 宿主的 system-prompt/assemble 会把「最近一条 user/message」当检索词发过来，
+# 但有些事件看着像用户消息、其实是宿主塞的：运行时快照、系统提醒、操作者锚点。
+# 拿这些去检索记忆，等于用一段英文模板匹配中文记忆，只会召回到垃圾。
+_HOST_BLOCK = re.compile(
+    # 成对的先剥成对；但在 DSH 里这些块实测经常没有闭合标签
+    # （system-reminder 就直接接正文到消息结尾），所以退化成「剥到文末」
+    r"<system-reminder>.*?(?:</system-reminder>|\Z)"
+    r"|<available_skills>.*?(?:</available_skills>|\Z)"
+    r"|<project_instructions>.*?(?:</project_instructions>|\Z)"
+    r"|<available-tools>.*?(?:</available-tools>|\Z)"
+    r"|Current runtime context\..*?(?=\n\n|\Z)"
+    r"|\[OPERATOR ANCHOR.*?(?=\Z)"
+    r"|## Tools\s.*?(?=\n\n\n|\Z)",
+    re.S | re.I,
+)
+
+# 强化回写去重：同一批 id 在短窗口内只记一次。
+# system-prompt/assemble 一个 turn 里会被调好几次，不去重等于刷分。
+_MARK_SEEN = {}
+_MARK_WINDOW = 6.0
+
+
+def sanitize_query(q):
+    """去掉宿主注入块；剩下的如果没有实词，返回空串（交给 build_recent 兜底）"""
+    if not q:
+        return ""
+    q = _HOST_BLOCK.sub(" ", q)
+    q = re.sub(r"\s+", " ", q).strip()
+    if not q:
+        return ""
+    # 剥完还是一大段英文的，基本是宿主模板的残渣 —— 但不能一刀切：
+    # 「Clash」「gdt」「node」这些正常的技术词也是纯英文，
+    # 之前这里只要没中文就返回空，导致英文查询全部石沉大海。
+    if not re.search(r"[一-龥]", q) and len(q) > 30:
+        return ""
+    try:
+        if not tokenize(q):
+            return ""
+    except Exception:
+        pass
+    return q[:400]
+
+
+def reinforce_used(ids):
+    """被注入正文的记忆 → 强化一次（半衰期拉长、recall_count+1）"""
+    if not ids:
+        return 0
+    now = time.time()
+    fresh = []
+    for mid in ids:
+        if not mid:
+            continue
+        if now - _MARK_SEEN.get(mid, 0.0) < _MARK_WINDOW:
+            continue
+        _MARK_SEEN[mid] = now
+        fresh.append(mid)
+    if not fresh:
+        return 0
+    try:
+        H.mark_used(fresh)
+        return len(fresh)
+    except Exception:
+        return 0
 
 
 class Handler(BaseHTTPRequestHandler):
@@ -386,9 +456,11 @@ class Handler(BaseHTTPRequestHandler):
             return json_resp(self, {"ok": False, "error": "token 不对"}, 401)
 
         if path == "/context":
-            q = body.get("query") or ""
+            q = sanitize_query(body.get("query") or "")
             with LOCK:
                 text, meta = H.prepare_context(q)
+                # 强化回路：只有真正进了注入正文的记忆才计一次
+                meta["reinforced"] = reinforce_used(meta.get("ids") or [])
             # 调试日志：看不同工作区的请求都带了什么
             try:
                 import time as _t
@@ -415,6 +487,52 @@ class Handler(BaseHTTPRequestHandler):
             with LOCK:
                 mems = H.recall(body.get("query") or "", limit=int(body.get("limit") or 8))
             return json_resp(self, {"memories": mems})
+        if path == "/mem/save":
+            # LLM 主动写入：模型自己判断该记什么、算什么类型
+            with LOCK:
+                r = ATOMIC.save(
+                    body.get("text") or "",
+                    kind=body.get("kind") or "fact",
+                    about=body.get("about") or "",
+                    session=body.get("session") or "",
+                )
+                # 新条目要立刻能被检索到，否则刚说的话自己都想不起来
+                if r.get("action") in ("add", "update"):
+                    H.retriever.invalidate_focus()
+            return json_resp(self, r)
+
+        if path == "/mem/search":
+            # LLM 主动检索：返回带 id 的条目，供模型自己引用
+            with LOCK:
+                q = sanitize_query(body.get("query") or "")
+                mems = H.retriever.recall(q, limit=int(body.get("limit") or 8))
+                # 不懂装懂比答错更糟。皮层激活分太低说明这块真没印象，
+                # 宁可返回空 + 说明，也不要硬凑十三条不相关的。
+                try:
+                    from hippocampus import cortex as _cx
+                    _act = _cx.activate(H.db, q, limit=5)
+                    _top = _act[0][1] if _act else 0.0
+                    if _top < float(body.get("min_score") or 0.24):
+                        mems = []
+                except Exception:
+                    pass
+            out = [
+                {"id": m["id"], "layer": m["layer"],
+                 "text": m.get("summary") or m.get("content") or "",
+                 "when": m.get("created")}
+                for m in mems
+            ]
+            resp = {"memories": out}
+            if not out:
+                # 没找到的时候别只返回空列表 —— 说清楚是「没记过」还是「没找到」，
+                # 这是自我模型：知道自己知道什么。
+                try:
+                    from hippocampus import selfmodel as _sm
+                    resp["note"] = _sm.why_empty(H.db, q, tokenize(q))
+                except Exception:
+                    pass
+            return json_resp(self, resp)
+
         if path == "/remember":
             with LOCK:
                 mid = H.remember(body.get("text") or "", layer=body.get("layer", "L2"),

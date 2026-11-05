@@ -1,6 +1,6 @@
 # Tan · 记忆插件
 
-`v0.3.2` · `MIT` · `Python 3.10+` · `Windows / macOS / Linux` · [更新日志](CHANGELOG.md)
+`v0.4.0` · `MIT` · `Python 3.10+` · `Windows / macOS / Linux` · [更新日志](CHANGELOG.md)
 
 > 给 AI 装一个会遗忘、会沉淀、有性格的记忆
 >

@@ -49,6 +49,42 @@ _SYSTEM_MARKERS = (
 )
 
 
+def report_digest(text, limit=420):
+    """长篇输出 → 大纲式记忆
+
+    留：markdown 标题、首段结论、要点行（·/-/数字序号）
+    丢：代码块、表格、纯装饰行
+    目标：留住「结论是什么、改了哪几处」，而不是只剩一句「先说结论」。
+    """
+    lines = []
+    in_code = False
+    seen = set()
+    for raw in str(text or "").splitlines():
+        s = raw.strip()
+        if s.startswith("```"):
+            in_code = not in_code
+            continue
+        if in_code or not s:
+            continue
+        if s.startswith("|") or set(s) <= set("-|: "):
+            continue
+        if s.startswith("#"):
+            item = s.lstrip("# ").strip()
+        elif s[0] in "·-*" or s[:2] in ("1.", "2.", "3.", "4.", "5."):
+            item = s.lstrip("·-* ").strip()[:100]
+        elif not lines:
+            item = s[:120]
+        else:
+            continue
+        if item and item not in seen:
+            seen.add(item)
+            lines.append(item)
+        if len(lines) >= 14:
+            break
+    out = "；".join(lines)
+    return out[:limit] if out else str(text or "").strip()[:80]
+
+
 def is_report_text(text, role):
     """判断这是不是我自己的长篇报告（不该整段当记忆）
 
@@ -191,12 +227,10 @@ def extract(text: str, role: str = "user") -> dict:
             "valence": 0.0, "emotion": 1.0, "protected": False,
         }
 
-    # 我自己的长篇报告：只留开头一句结论
+    # 我自己的长篇报告：压成大纲，不是砍成一句话
     is_report = is_report_text(t, role)
     if is_report:
-        t = t.strip()
-        head = t.split(chr(10))[0][:80]
-        t = head
+        t = report_digest(t)
     res = {
         "keep": False, "noise": False, "layer": "L1",
         "content": t, "loops": [], "entities": [],

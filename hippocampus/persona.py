@@ -47,6 +47,40 @@ RE_JUDGE = re.compile(
 # 指令前缀（通用）：以后 / 别 / 不要 / 每次 / 下次 / 尽量
 RE_IMPERATIVE = re.compile(r"(以后|从今(?:天|后)|下次|每次|尽量|麻烦你?|请你?|别|不要|不用)")
 
+# ---------- 人格信号的卫生检查 ----------
+# 「别 / 不用」开头的句子绝大多数是技术指令，不是性格。
+# 带盘符、扩展名、命令、URL、成串数字的，一律不是人格表达。
+RE_TECH = re.compile(
+    r"([A-Za-z]:\\|/[\w.]+/|\.(?:py|js|json|yml|yaml|md|db|exe|bat|ps1|toml)\b|"
+    r"```|https?://|\b(?:npm|pnpm|pip|git|curl|reg|cmd|powershell|python)\b|"
+    r"\d{3,})"
+)
+# 人格条目必须像「在说人怎么相处」，得有个人称
+RE_WHO = re.compile(r"(你|我|咱)")
+
+TRAIT_MAX = 24      # 性格条目不该是长句
+JUDGE_MAX = 40
+
+
+# 纯应答 / 收尾：「不用啦这样子就可以了」不是性格，是一句话的结束
+RE_DISMISS = re.compile(r"^(不用啦?|算了|就这|这样就行|这样就|行了|好的|嗯|哦|可以了)")
+# 明显是在交代任务的开口
+RE_REQUEST = re.compile(r"^(请|帮我|给我|麻烦|你能不能|能不能)")
+
+
+def persona_like(clause, limit):
+    """这句话配不配进人格"""
+    c = (clause or "").strip()
+    if not c or len(c) > limit:
+        return False
+    if RE_TECH.search(c):
+        return False
+    if RE_REQUEST.match(c):
+        return False          # 「请分析这张图片」是任务，不是性格
+    if RE_DISMISS.match(c) and len(c) < 20:
+        return False          # 「不用啦这样子就可以了」是收尾，不是偏好
+    return True
+
 SPEECH_HINT = re.compile(
     r"(说话|回复|回答|语气|风格|表达|啰嗦|简洁|详细|简短|正式|客气|随意|轻松|"
     r"可爱|活泼|严肃|幽默|人话|绕|直白|长|短|列|写)"
@@ -58,7 +92,7 @@ JUDGE_HINT = re.compile(r"(重要|意义|管|结果|过程|细节|先|直接)")
 def _clause(text, pos, limit=34):
     """从 pos 往后截一个短句（到标点或 limit 字）"""
     tail = text[pos:pos + limit + 6]
-    for p in "。！？；;,.!?\n":
+    for p in "。！？；;，、：,.!?\n":
         i = tail.find(p)
         if 0 < i :
             tail = tail[:i]
@@ -75,6 +109,9 @@ def detect_preferences(text):
     out = []
     t = (text or "").strip()
     if not t or len(t) < 3:
+        return out
+    # 长段落是在描述任务，不是在做自我表达
+    if len(t) > 90:
         return out
 
     # ① 称呼约定：优先级最高
@@ -98,11 +135,15 @@ def detect_preferences(text):
         clause = _clause(t, m.start(), 34)
         if len(clause) >= 2:
             if SPEECH_HINT.search(t):
-                out.append(("speech", clause, "他给了说话方式的要求"))
+                if persona_like(clause, JUDGE_MAX):
+                    out.append(("speech", clause, "他给了说话方式的要求"))
             elif JUDGE_HINT.search(t):
-                out.append(("judgment", clause, "他表达了对这件事的取舍"))
+                if persona_like(clause, JUDGE_MAX):
+                    out.append(("judgment", clause, "他表达了对这件事的取舍"))
             else:
-                out.append(("trait", clause, "他提了一个要求"))
+                # trait 是最容易装垃圾的一类：必须短、必须带人称、必须没有技术味
+                if persona_like(clause, TRAIT_MAX):
+                    out.append(("trait", clause, "他提了一个要求"))
         return out
 
     # ④ 没有指令前缀，但明显在评价说话方式（"太啰嗦了"）
@@ -113,7 +154,8 @@ def detect_preferences(text):
     # ⑤ 价值观表达
     if RE_JUDGE.search(t):
         clause = _clause(t, max(0, RE_JUDGE.search(t).start() - 6), 30)
-        out.append(("judgment", clause or t[:30], "他的取舍标准"))
+        if persona_like(clause, JUDGE_MAX):
+            out.append(("judgment", clause, "他的取舍标准"))
         return out
 
     return out

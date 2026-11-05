@@ -7,6 +7,7 @@ import time
 
 from . import config
 from .db import _decode_memory
+from . import focus as focus_mod
 
 
 def _days_since(ts):
@@ -23,10 +24,11 @@ def decay(mem):
     return math.exp(-_days_since(mem.get("created")) / hl)
 
 
-def bm25_score(mem, query_terms, idf=None, avg_len=400, k1=1.4, b=0.72):
+def bm25_score(mem, query_terms, idf=None, avg_len=400, k1=1.4, b=0.72, term_w=None):
     """BM25：比「命中率」准得多
 
     k1 控制词频饱和，b 控制文档长度惩罚（0=不惩罚，1=完全惩罚）
+    term_w: 逐词权重，用来给同义词扩展词降权
     """
     if not query_terms:
         return 0.0
@@ -41,7 +43,7 @@ def bm25_score(mem, query_terms, idf=None, avg_len=400, k1=1.4, b=0.72):
         if tl not in text:
             continue
         tf = text.count(tl)
-        w = (idf or {}).get(tl, 1.0)
+        w = (idf or {}).get(tl, 1.0) * (term_w or {}).get(tl, 1.0)
         denom = tf + k1 * (1 - b + b * (dl / max(1, avg_len)))
         score += w * (tf * (k1 + 1)) / max(0.001, denom)
 
@@ -103,10 +105,29 @@ def score(mem, query_terms, now_terms=()):
         rel = min(1.0, rel + 0.35 * ent_hit)
 
     d = decay(mem)
+    # 负面偏好：挨过骂、出过岔子的经历，比顺利的记得更牢。
+    # 这是人和数据库的差别之一 —— 数据库对所有记录一视同仁。
+    _val = float(mem.get("valence") or 0.0)
     emo = float(mem.get("emotion") or 1.0)
+    if _val < -0.3:
+        emo *= 1.4
+    elif _val < -0.1:
+        emo *= 1.15
     rc = int(mem.get("recall_count") or 0)
     reinforce = 1 + 0.2 * min(rc, 5)
     boost = config.LAYER_BOOST.get(mem.get("layer"), 1.0)
+    # 提炼过的结论优先于原始碎片。
+    # 结论天生是「综合的」，一条里讲好几件事，focus 天然比单点细节低，
+    # 不额外加权的话永远被碎片压着——那就等于白巩固了。
+    try:
+        prov = mem.get("provenance") or {}
+        if isinstance(prov, str):
+            import json as _json
+            prov = _json.loads(prov)
+        if isinstance(prov, dict) and prov.get("by") == "llm":
+            boost *= getattr(config, "CONCLUSION_BOOST", 1.6)
+    except Exception:
+        pass
     conf = float(mem.get("confidence") or 0.7)
     rej = int(mem.get("reject_count") or 0)
     reject_penalty = 1.0 / (1 + 0.5 * rej)
@@ -207,10 +228,50 @@ def expand_terms(terms):
     return list(out)
 
 
+EXPAND_WEIGHT = 0.35   # 扩展词只占原词的三分之一，当线索用，不当主角
+EXPAND_GATE = 4        # 原词召回少于这么多条时才扩，避免本来就很准的查询被搅浑
+
+
+def expand_weighted(terms):
+    """返回 (加权词表, {词: 权重})：原词 1.0，扩展词 EXPAND_WEIGHT"""
+    base = set(t.lower() for t in terms if t)
+    w = {t: 1.0 for t in base}
+    for t in terms:
+        tl = (t or "").lower()
+        if not tl:
+            continue
+        for key, alts in SYNONYMS.items():
+            if key in tl or tl in key:
+                for a in alts[:MAX_EXPAND]:
+                    al = a.lower()
+                    if al in w:
+                        continue
+                    w[al] = EXPAND_WEIGHT
+    return list(w.keys()), w
+
+
 class Retriever:
     def __init__(self, db):
         self.db = db
         self._idf = None
+        self._focus_built = False
+
+    def invalidate_focus(self):
+        """有新记忆写入时调用：下次查询重建索引"""
+        self._focus_built = False
+
+    def _ensure_focus(self, mems):
+        """构建主题集中度索引（一次，之后只加不减）"""
+        if self._focus_built:
+            return
+        try:
+            focus_mod.build([
+                (m["id"], (m.get("content") or "") + " " + (m.get("summary") or ""))
+                for m in mems
+            ])
+            self._focus_built = True
+        except Exception:
+            pass
 
     def _build_idf(self, terms):
         """按当前查询词，统计它们在多少条记忆里出现 → 算 IDF 权重
@@ -235,6 +296,11 @@ class Retriever:
             except Exception:
                 df = 0
             import math
+            if df <= 0:
+                # 库里从没出现过的词，多半是 2-gram 切出来的碎片，
+                # 不能因为「罕见」就给它最高分
+                idf[t] = 0.0
+                continue
             w = math.log(1 + n / (1 + df))
             # 出现在 >50% 记忆里的词，几乎等于泛词，压到很低
             if df > n * 0.5:
@@ -245,30 +311,109 @@ class Retriever:
     def recall(self, query="", current_thread=None, limit=None):
         limit = limit or config.RECALL_CANDIDATES
         terms = tokenize(query)
+        # 「可以」「弄吧」「你好」这类查询分词后一个实词都不剩。以前这种会被当成
+        # 「无查询」，把全部记忆按衰减排一遍，硬塞 17 条 800 多 token 进上下文。
+        # 现在直接返回空，交给 prepare_context 的 build_recent(3) 做兜底。
+        if not terms:
+            return []
 
         rows = self.db.query(
             "SELECT * FROM memories WHERE status='active' AND sensitivity!='secret'"
         )
         mems = [_decode_memory(r) for r in rows]
+        self._ensure_focus(mems)
+
+        # 查询信息不足时（「那个呢」「这种怎么弄」），用工作记忆的焦点补全。
+        # 人聊天是连续的，程序得知道刚才在聊什么。
+        try:
+            from . import focusmem as _fm
+            _enriched = _fm.enrich_query(self.db, query, tokenize(query))
+            if _enriched != query:
+                query = _enriched
+        except Exception:
+            pass
+
+        # 先跑皮层：查询词点亮概念，概念再连到记忆。
+        # 这是主信号，后面那些字符匹配只用来补漏。
+        cortex_act = {}
+        try:
+            from . import cortex as _cortex
+            for _mid, _sc in _cortex.activate(self.db, query, limit=60):
+                cortex_act[_mid] = _sc
+        except Exception:
+            pass
+        _cmax = max(cortex_act.values()) if cortex_act else 0.0
 
         scored = []
         idf = None
-        exp_terms = expand_terms(terms) if (terms and USE_SYNONYM_EXPAND) else terms
+        # 先算一次 IDF，把库里不存在的查询词剔掉。
+        # 「网络怎么走」会切出「络怎」「么走」，这类碎片会让 related 判断失真。
+        if terms:
+            _idf0 = self._build_idf(terms)
+            real = [t for t in terms if _idf0.get(t.lower(), 0) > 0]
+            # 全被剔掉（例如整句话都很生僻）就保留原样，别让查询变空
+            if real:
+                terms = real
+        # 先只看原词：够准就不扩，不准了才拿同义词补
+        base_hits = sum(
+            1 for m in mems
+            if any(t.lower() in ((m.get("content") or "") + (m.get("summary") or "")).lower()
+                   for t in terms)
+        ) if terms else 0
+        if terms and base_hits < EXPAND_GATE:
+            exp_terms, term_w = expand_weighted(terms)
+        else:
+            exp_terms, term_w = terms, None
         has_query = bool(query and terms)
         for m in mems:
             if idf is None:
                 idf = self._build_idf(terms)
             # 两路打分取高的：BM25（词频归一）+ 原命中率（兜底）
-            r1 = bm25_score(m, exp_terms, idf) if exp_terms else 0.0
+            r1 = bm25_score(m, exp_terms, idf, term_w=term_w) if exp_terms else 0.0
             r2 = relevance_of(m, terms, idf)
-            rel = max(r1, r2)
+            # 主题集中度：同样命中「迅雷」，专门讲它的和顺带提一句的，要分开
+            fc = 1.0
+            if terms:
+                cov = focus_mod.coverage(m["id"], terms)
+                foc = focus_mod.focus(m["id"], terms)
+                # 用幂函数放大差距：focus 0.05 和 0.35 差 7 倍，
+                # 线性加权只有 3 倍，压不住那些"顺带提一句"的长文
+                # 0.6 次幂 + 0.08 保护下限：
+                # 幂次太狠会把"答案藏在长文里"的那些也压死（找不到 node / 残留文件
+                # 这两类直接掉分），太松又压不住噪音。
+                fc = cov * max(0.08, foc ** 0.6)
+            # 只用 focus 加权，不要再 max(bm25)：
+            # bm25_score 里有 min(1.0, ...)，凡是命中的都被顶到 1.0，
+            # 长度惩罚形同虚设，一取 max 就把 focus 的区分度全抹平了。
+            # 皮层激活值（归一化）为主，focus 为辅。
+            # 皮层那层隔了「概念」，比单纯的字面命中更接近记忆的工作方式。
+            cn = (cortex_act.get(m["id"], 0.0) / _cmax) if _cmax > 0 else 0.0
+            if terms and _cmax > 0:
+                rel = 0.72 * cn + 0.28 * (r2 * fc)
+            elif terms:
+                rel = r2 * fc
+            else:
+                rel = max(r1, r2)
+            # 只是正文里顺带提过一句的，不算命中。
+            # 「迅雷」在一条 420 字的汇报里出现一次，focus ≈ 0.005，
+            # 这种条目以前照样进正文，占掉一半预算。
+            # 注意用原始 foc 判断，不能用 fc —— fc 里有 0.08 的保底，
+            # 会把「只提了一次」的长文（foc≈0.004）拉到 0.08，门槛就形同虚设。
+            # 被皮层点亮的记忆不再看字面门槛 ——
+            # 它可能是通过概念关联进来的，字面上一个字都不重合，但正是该想起来的
+            if (terms and cn <= 0 and foc < 0.0015
+                    and m.get("layer") not in ("L4", "L5")):
+                continue
             s = score(m, terms)
             if current_thread and m.get("thread_id") == current_thread:
                 s *= 1.5
                 rel = max(rel, 0.3)
             if has_query:
                 # 有查询时，完全不相关的直接丢掉（除非它是身份/程序层）
-                if rel <= 0 and m.get("layer") not in ("L4", "L5", "L3"):
+                # L3（方法）以前是无条件保留的，结果每条查询的第一位
+                # 都是「记忆服务在 18765」这种程序性知识，跟问什么都无关。
+                # 程序性知识也该看相关度，不该霸着位置。
+                if rel <= 0 and m.get("layer") not in ("L4", "L5"):
                     continue
                 s = s * (0.15 + rel)      # 相关度主导
             else:
@@ -277,25 +422,50 @@ class Retriever:
                 continue
             scored.append((s, m))
 
-        scored.sort(key=lambda x: -x[0])
+        # 身份层 / 教训层保底：库里这两类一共就几条，
+        # 但「我最看重什么」「什么事你让我别再做」这类问题全靠它们。
+        # 它们跟 query 的字面重合通常是 0，按分数排必然被切掉，所以单独捞。
+        anchors = [m for m in mems if m.get("layer") in ("L4", "L5", "L2-")]
+        anchor_ids = set(id(m) for m in anchors)
 
-        # 实体扩散：命中实体带出关联记忆
-        picked = [m for _, m in scored[:limit]]
-        if terms:
-            qtext = " ".join(terms)
-            seeds = []
-            for m in picked[:5]:
-                for e in (m.get("entities") or [])[:6]:
-                    if e and e.lower() in qtext:
-                        seeds.append(e)
-            if seeds:
-                for m in mems:
-                    if m in picked:
+        # 原词是否直接命中：扩展召回的条目不能和真命中平起平坐，
+        # 否则「广告插件」这种查询会被同义词带进来一堆弱相关的，正文直接灌满。
+        def _base_hit(m):
+            t = ((m.get("content") or "") + " " + (m.get("summary") or "")).lower()
+            return any(x.lower() in t for x in terms)
+
+        if term_w is not None:
+            scored.sort(key=lambda x: (0 if _base_hit(x[1]) else 1, -x[0]))
+            strong = [m for _, m in scored if _base_hit(m)]
+            weak = [m for _, m in scored if not _base_hit(m)]
+            # 弱相关最多放 strong 的等量条数（且不少于 2 条），留个兜底但不喧宾夺主
+            picked = (strong + weak[:max(2, len(strong))])[:limit]
+        else:
+            scored.sort(key=lambda x: -x[0])
+            picked = [m for _, m in scored[:limit]]
+
+        # 身份/教训只做「兜底」：只有一条都没召回到时才顶上来。
+        # 之前无条件加进去，结果每条查询的正文开头都是那两条性格偏好，
+        # 真答案全被挤到后面 —— 「迅雷广告」召不出一停「迅雷广告」。
+        if not picked and anchors:
+            picked = anchors
+        # 联想：顺着图谱的边，把跟命中记忆真正相关的那几条带出来。
+        # 比原来按实体硬拉的准 —— 边是建图时按共享实体 + 文本相近算好的，
+        # 不会因为某条长文顺手提了一句「迅雷」就被拽进来。
+        if picked:
+            try:
+                from . import graph as _graph
+                top_ids = [m["id"] for m in picked[:6] if m.get("id")]
+                have = set(id(m) for m in picked)
+                for w, nid in _graph.neighbors(self.db, top_ids, limit=4):
+                    nm = self.db.get_memory(nid)
+                    if not nm or nm.get("status") != "active" or id(nm) in have:
                         continue
-                    if any(e in (m.get("entities") or []) for e in set(seeds)):
-                        picked.append(m)
-                    if len(picked) >= limit + 3:
-                        break
+                    nm["_via"] = w          # 标记「这是联想出来的」，注入时可以排在后面
+                    picked.append(nm)
+                    have.add(id(nm))
+            except Exception:
+                pass
 
         return picked
 
@@ -341,47 +511,100 @@ class Retriever:
             total += n
         return "\n".join(lines), used, total
 
+    def _update_focus(self, query, mems):
+        """把这一轮点亮的概念推进工作记忆"""
+        try:
+            from . import focusmem as _fm
+            cons = []
+            for m in (mems or [])[:6]:
+                mid = m.get("id")
+                if not mid:
+                    continue
+                # 只要真正的概念：freq>=4 说明它在多条记忆里都出现，
+                # 是「迅雷」「Clash」这种有意义的词；
+                # 不过滤的话「第一」「公事」「和结」这类切词碎片会占满焦点。
+                for r in self.db.query(
+                    "SELECT t.concept, c.freq FROM traces t "
+                    "JOIN concepts c ON c.name = t.concept "
+                    "WHERE t.memory_id=? AND c.freq >= 4 "
+                    "ORDER BY c.freq DESC LIMIT 6", (mid,)
+                ):
+                    cons.append(r["concept"])
+            _fm.touch(self.db, cons[:24], weight=1.0)
+        except Exception:
+            pass
+
     def build_context(self, query="", current_thread=None, budget=None):
         """返回 (文本, 使用的记忆列表, token 占用)"""
         budget = budget or dict(config.BUDGET)
         mems = self.recall(query, current_thread)
 
         # 分桶
-        buckets = {"identity": [], "procedure": [], "counter": [], "semantic": [], "episodic": []}
-        for m in mems:
-            layer = m.get("layer")
-            if layer in ("L4", "L5"):
-                buckets["identity"].append(m)
-            elif layer == "L3":
-                buckets["procedure"].append(m)
-            elif layer == "L2-":
-                buckets["counter"].append(m)
-            elif layer == "L2":
-                buckets["semantic"].append(m)
-            else:
-                buckets["episodic"].append(m)
+        # 不再按「身份/方法/事实/情景」固定顺序装桶。
+        # 那样做的后果是：一条跟查询无关的 L3 方法记忆永远排第一，只因为类别靠前。
+        # 大脑不是按分类说话的，是想到什么说什么。
+        max_items = getattr(config, "INJECT_MAX_ITEMS", 6)
+        # 默认 0：身份记忆不再无条件占前两位。
+        # 「我是谁」只在该被想起的时候出现（问说话方式、问偏好），
+        # 而不是问「迅雷」也先塞两条「喜欢可爱轻松的语气」。
+        ident_quota = getattr(config, "INJECT_IDENTITY_QUOTA", 0)
 
-        used = []
-        lines = []
-        total_tokens = 0
+        used, out_lines, total_tokens = [], [], 0
+        budget_left = sum(budget.values()) if isinstance(budget, dict) else 1500
 
-        for name, cap in (("identity", budget["identity"]), ("procedure", budget["procedure"]),
-                          ("counter", budget["counter"]), ("semantic", budget["semantic"]),
-                          ("episodic", budget["episodic"])):
-            room = cap
-            for m in buckets[name]:
-                if room <= 0:
-                    break
-                text = self._render(m)
-                tk = min(config.estimate_tokens(text), config.SINGLE_ITEM_MAX)
-                if tk > room and used:
-                    continue
-                lines.append(text)
-                used.append(m)
-                room -= tk
-                total_tokens += tk
+        def _take(m):
+            nonlocal total_tokens, budget_left
+            text = self._render(m)
+            tk = min(config.estimate_tokens(text), config.SINGLE_ITEM_MAX)
+            out_lines.append(text)
+            used.append(m)
+            total_tokens += tk
+            budget_left -= tk
 
-        return "\n".join(lines), used, total_tokens
+        # ① 身份层留固定名额：「我是谁」在任何话题下都成立
+        for m in [x for x in mems if x.get("layer") in ("L4", "L5")][:ident_quota]:
+            if len(used) >= max_items or budget_left <= 0:
+                break
+            _take(m)
+
+        # ② 直接命中的，按相关度顺序
+        seen = set(u.get("id") for u in used)
+        direct = [m for m in mems if not m.get("_via")]
+        linked = [m for m in mems if m.get("_via")]
+
+        # 给「顺带想起」留名额，否则直接命中会把 6 个位置全占满，
+        # 联想永远出不来（实测：direct 有 10 条候选，前 6 个就填满了）
+        direct_cap = max_items - getattr(config, "INJECT_LINKED_MAX", 2)
+        for m in direct:
+            if len(used) >= direct_cap or budget_left <= 0:
+                break
+            if m.get("id") in seen:
+                continue
+            seen.add(m.get("id"))
+            _take(m)
+
+        # ③ 顺着图谱边想起的，单独成段。这是「主动」的部分：
+        #    用户没问，但它跟当前话题有关，就该自己冒出来。
+        asked = getattr(config, "INJECT_LINKED_MAX", 2)
+        picked_link = []
+        for m in linked:
+            if len(picked_link) >= asked or len(used) >= max_items or budget_left <= 0:
+                break
+            if m.get("id") in seen:
+                continue
+            seen.add(m.get("id"))
+            _take(m)
+            picked_link.append(m)
+
+        if picked_link:
+            # 给联想的那几条加个小标题，跟直接命中分开
+            texts = out_lines[:]
+            head = texts[:len(texts) - len(picked_link)]
+            tail = texts[len(texts) - len(picked_link):]
+            out_lines = head + ["（顺带想起）"] + tail
+
+        self._update_focus(query, used)
+        return "\n".join(out_lines), used, total_tokens
 
     def _render(self, m):
         layer = m.get("layer")
@@ -391,6 +614,11 @@ class Retriever:
         body = m.get("summary") or m.get("content") or ""
         if m.get("fidelity") == "verbatim":
             body = m.get("content") or body
+        # 单条注入上限：预算按 SINGLE_ITEM_MAX 算，正文却按原样塞，就会超支。
+        # 一条 800 字的汇报能把整个 semantic 仓吃光，其余真命中全被挤掉。
+        body = (body or "").strip()
+        if len(body) > 260:
+            body = body[:259].rstrip() + "…"
         return f"· [{tag}·{when}] {body}"
 
     def mark_used(self, mems, rejected=False):

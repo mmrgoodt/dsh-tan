@@ -15,6 +15,7 @@
  */
 import { spawn } from "node:child_process";
 import { existsSync, readFileSync, writeFileSync } from "node:fs";
+import { registerMemoryTools } from "./memory-tools.js";
 import { join } from "node:path";
 
 export const name = "hippocampus";
@@ -26,6 +27,8 @@ const MEMORY_ORDER = 9000;
 
 let apiProcess = null;
 let authWarned = false;
+let lastContextKey = "";
+let lastContextText = "";
 
 /* ---------------- HTTP ---------------- */
 
@@ -147,17 +150,68 @@ function extractTurn(events, turn) {
   return { user, assistant };
 }
 
-/** 最近一条用户消息（作为检索 query） */
+/**
+ * 宿主注入块的指纹。
+ * 这些内容会以 user/message 事件出现，但根本不是用户说的话：
+ * 时间快照、运行时上下文、系统提醒、技能清单、操作者锚点。
+ * 拿它们去检索记忆，只会用一段英文模板把中文记忆全推下去。
+ */
+const HOST_BLOCK_MARKS = [
+  "<system-reminder>",
+  "<available_skills>",
+  "<project_instructions>",
+  "Current runtime context.",
+  "[OPERATOR ANCHOR",
+  "## Tools\n",
+];
+
+function looksLikeHostNoise(txt) {
+  if (!txt) return true;
+  const head = txt.slice(0, 400);
+  return HOST_BLOCK_MARKS.some((m) => head.includes(m));
+}
+
+/**
+ * 最近一条真正的用户消息（作为检索 query）
+ *
+ * 有个坑：system-prompt/assemble 是在**本轮用户消息写进事件流之前**调用的。
+ * 实测 09:54:34 调 /context 时，events 末尾还是上一轮的 assistant 消息，
+ * 于是 q 恒为空、每轮都在盲搜 —— 记忆系统对 IM 一直是瞎的。
+ *
+ * 所以要有兜底：拿不到本轮用户消息时，用最近一条 assistant 消息，
+ * 至少让检索承接上一轮的上下文，比空搜强。
+ */
 function lastUserText(events) {
   for (let i = events.length - 1; i >= 0; i--) {
     const ev = events[i];
     if (ev.type !== "user/message") continue;
-    // time-context 是宿主塞的时间快照，不是用户说的话，不能拿来当检索词
-    if (ev.data?.source?.kind === "time-context") continue;
+    const kind = ev.data?.source?.kind;
+    // time-context / runtime-context 都是宿主塞的，不是用户说的话
+    if (kind === "time-context" || kind === "runtime-context") continue;
     const txt = textOf(ev);
-    if (txt) return txt.slice(0, 200);
+    if (!txt) continue;
+    if (looksLikeHostNoise(txt)) continue;
+    return txt.slice(0, 200);
+  }
+  // 兜底：沿用上一轮的助手发言，别让检索空转
+  for (let i = events.length - 1; i >= 0; i--) {
+    const ev = events[i];
+    if (ev.type !== "assistant/message") continue;
+    const txt = textOf(ev);
+    if (txt && txt.length > 8) return txt.slice(0, 200);
   }
   return "";
+}
+
+/** 当前 turn 序号，用来做「同一轮只取一次记忆」的缓存键 */
+function currentTurn(events) {
+  for (let i = events.length - 1; i >= 0; i--) {
+    const ev = events[i];
+    if (ev.type === "turn/start" && typeof ev.data?.turn === "number") {
+      return ev.data.turn;
+    }
+  }
+  return -1;
 }
 
 /** 读取并清空「待播报」队列（主动消息在下次对话开头带出来） */
@@ -226,9 +280,29 @@ export function apply(ctx, config = {}) {
 
   ctx.effect(() => () => clearInterval(guard), "hippocampus: health guard");
 
+  // ①·5 让模型自己管记忆：register memory_save / memory_search
+  // 注册失败只影响工具，不影响注入，所以整段包在 try 里
+  try {
+    const disposeTools = registerMemoryTools(ctx, base);
+    if (typeof disposeTools === "function") ctx.effect?.(() => disposeTools, "hippocampus: memory tools");
+  } catch (e) {
+    logger?.warn?.(`dsh-tan: memory tools 未注册（${e}）`);
+  }
+
   // ② 每个 agent 一建好就挂上本插件的事件（agent.ctx 随 agent 释放自动解绑）
   ctx.on("agent/created", ({ agent }) => {
     if (!agent?.ctx) return;
+
+    // 工具在 agent.ctx 上再注册一次。根 ctx 未必暴露 tools，
+    // 而 agent 级别是 dsh-browser-cdp 验证过的路径。
+    try {
+      if (!agent.__tanTools) {
+        agent.__tanTools = true;
+        registerMemoryTools(agent.ctx, base);
+      }
+    } catch (e) {
+      logger?.warn?.(`dsh-tan: agent 级工具注册失败 ${e}`);
+    }
 
     // 对话前：人格 + 记忆 + 攒下的主动消息
     agent.ctx.on("system-prompt/assemble", async (assembly, context, next) => {
@@ -237,16 +311,28 @@ export function apply(ctx, config = {}) {
         if (context?.agent !== undefined && context.agent !== agent) return result;
 
         const events = agent.session?.snapshotEvents?.() ?? [];
-        const data = await callApi(base, "/context", { query: lastUserText(events) });
+        // assemble 一个 turn 里会被调好几次（每次都可能带工具定义刷新）。
+        // 以前每次都重新 /context：日志里同一条 query 刷 3~12 行，
+        // 服务端还跟着重复记强化。这里按 (session, turn) 缓存一次结果。
+        const cacheKey = `${agent.session?.id ?? ""}#${currentTurn(events)}`;
+        if (cacheKey !== lastContextKey) {
+          const q = lastUserText(events);
+          // 把 query 打出来：空 query 会让检索直接失效，这是最容易静默出问题的地方
+          logger?.info?.(`[hippocampus] q=${JSON.stringify(q.slice(0, 40))} (${q.length})`);
+          const data = await callApi(base, "/context", { query: q });
+          lastContextKey = cacheKey;
+          lastContextText = data?.text ?? "";
+        }
+        const text = lastContextText;
         const pending = drainPending(root);
-        if (!data?.text && !pending) return result;
+        if (!text && !pending) return result;
 
         const drop = new Set(["hippocampus:memory", "hippocampus:pending"]);
         const sections = Array.isArray(result?.sections)
           ? result.sections.filter((s) => !drop.has(s?.name))
           : [];
-        if (data?.text) {
-          sections.push({ name: "hippocampus:memory", order: MEMORY_ORDER, text: data.text });
+        if (text) {
+          sections.push({ name: "hippocampus:memory", order: MEMORY_ORDER, text });
         }
         if (pending) {
           sections.push({

@@ -1,6 +1,6 @@
 {
   "name": "dsh-tan",
-  "version": "0.3.2",
+  "version": "0.4.0",
   "description": "给 DeepSeek Harness 装一个会遗忘、会沉淀、有性格的记忆（本地 SQLite；设置页为可选安装）",
   "type": "module",
   "main": "./lib/index.js",

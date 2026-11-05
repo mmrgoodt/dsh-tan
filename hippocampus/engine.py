@@ -37,6 +37,7 @@ class Hippocampus:
                 parts.append(pb)
 
         # ② 记忆块
+        used_ids = []
         mem_text, used, tokens = self.retriever.build_context(query)
         if not mem_text:
             # 「你好」「在吗」这类短问候召回为空时，给最近的几条，
@@ -44,6 +45,7 @@ class Hippocampus:
             mem_text, used, tokens = self.retriever.build_recent(limit=3)
         if mem_text:
             parts.append("## 我记得的事\n" + mem_text)
+            used_ids = [m["id"] for m in used if m.get("id")]
 
         # ③ 未闭合提醒（每轮最多 1 条）
         hints = self.loops.due_for_mention(query)
@@ -58,15 +60,35 @@ class Hippocampus:
             except Exception:
                 pass
 
+        # ④ 该归纳的：每天最多提一次。
+        # 巩固不能靠人记得做，但也不能每轮都念 —— 那叫唠叨。
+        try:
+            import time as _t
+            _last = self.db.one("SELECT MAX(ts) t FROM events WHERE kind='digest_shown'")
+            _due = (not _last or not _last["t"] or (_t.time() - _last["t"]) > 20 * 3600)
+            if _due:
+                from . import digest as _dg
+                _txt = _dg.render(self.db)
+                if _txt:
+                    parts.append("## 还没归纳的" + chr(10) + _txt +
+                                 chr(10) + "（聊到了就顺手用 memory_save 归纳一条，没聊到就放着）")
+                    self.db.execute(
+                        "INSERT INTO events (ts,kind,payload) VALUES (?,?,?)",
+                        (_t.time(), "digest_shown", "{}"))
+        except Exception:
+            pass
+
         return "\n\n".join(parts), {
             "memories": len(used),
             "tokens": tokens,
             "loops": inject_loops,
+            # 真正进了正文的记忆 id：调用方据此回写强化，否则 recall_count 永远为 0
+            "ids": used_ids,
         }
 
     # ==================== 对话后：写入 ====================
-    def after_turn(self, user_text="", assistant_text="", session="", turn=0, context_note=""):
-        r = self.writer.ingest_turn(user_text, assistant_text, session, turn, context_note)
+    def after_turn(self, user_text="", assistant_text="", session="", turn=0, context_note="", ts=None):
+        r = self.writer.ingest_turn(user_text, assistant_text, session, turn, context_note, ts)
         # 人格消化
         self.persona.observe(user_text)
         # 记录用户消息事件（用于主动消息的回访判断）
@@ -84,6 +106,30 @@ class Hippocampus:
         if last and last["t"] and (time.time() - last["t"]) < 20 * 3600:
             return
         self.forgetter.sweep()
+        # 每天重建一次：图谱（记忆之间的边）和皮层（概念之间的突触）。
+        # 皮层全量重建现在只要 0.1 秒（之前卡在逐条 INSERT，改批量后就好了）。
+        try:
+            from . import graph as _graph
+            _graph.build_edges(self.db)
+        except Exception:
+            pass
+        try:
+            from . import cortex as _cortex
+            _cortex.build(self.db)
+        except Exception:
+            pass
+        # 睡一觉：重放强化 + 突触修剪（合并不开，实测会误并高价值记忆）
+        try:
+            from . import sleep as _sleep
+            _sleep.sleep(self.db)
+        except Exception:
+            pass
+        # 重建预测表：对话序列每天在变，「问完 A 接着问 B」的规律要跟着更新
+        try:
+            from . import predict as _predict
+            _predict.build(self.db)
+        except Exception:
+            pass
         self.db.execute(
             "INSERT INTO events (ts,kind,payload) VALUES (?,?,?)",
             (time.time(), "daily_sweep", "{}"),

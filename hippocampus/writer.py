@@ -13,13 +13,17 @@ class Writer:
     def __init__(self, db):
         self.db = db
 
-    def ingest_turn(self, user_text="", assistant_text="", session="", turn=0, context_note=""):
-        """处理一轮对话，返回本次写入的结果"""
+    def ingest_turn(self, user_text="", assistant_text="", session="", turn=0,
+                    context_note="", ts=None):
+        """处理一轮对话，返回本次写入的结果
+
+        ts: 这一轮的真实时间（回补历史时用，缺省就取当前时间）
+        """
         out = {"memories": [], "loops": [], "thread": None, "noise": 0}
 
         # 1) 用户侧
         if user_text:
-            r = self._ingest_one(user_text, "user", session, turn, context_note)
+            r = self._ingest_one(user_text, "user", session, turn, context_note, ts)
             out["memories"] += r["memories"]
             out["loops"] += r["loops"]
             out["noise"] += r["noise"]
@@ -28,14 +32,25 @@ class Writer:
 
         # 2) 助手侧（只记结论/决策，权重低）
         if assistant_text:
-            r = self._ingest_one(assistant_text, "assistant", session, turn, context_note)
+            r = self._ingest_one(assistant_text, "assistant", session, turn, context_note, ts)
             out["memories"] += r["memories"]
             out["loops"] += r["loops"]
 
         return out
 
-    def _ingest_one(self, text, role, session, turn, context_note):
+    def _ingest_one(self, text, role, session, turn, context_note, ts=None):
         info = extractor.extract(text, role)
+        # 只留有价值的：有具体坐标，或者明确是决策/教训。
+        # 不加这道闸，360 条里 256 条是流水账，抢的是真事的预算。
+        try:
+            from .gate import should_keep
+            # noise 也要过闸。之前排除 noise 是个漏洞：
+            # 「好的没问题」被判为噪音后走了 noise 分支，照样入库。
+            if info.get("keep"):
+                if not should_keep(info.get("content") or text, info.get("layer")):
+                    return {"memories": [], "loops": [], "noise": 0, "thread": None}
+        except Exception:
+            pass
         res = {"memories": [], "loops": [], "noise": 0, "thread": None}
         if not info["keep"]:
             return res
@@ -49,6 +64,7 @@ class Writer:
                 summary=extractor.summarize(text, 40),
                 source="S1" if role == "user" else "S3",
                 emotion=1.0,
+                created=ts,
                 context_note=context_note,
                 entities=[],
                 tags=["noise"],
@@ -66,6 +82,29 @@ class Writer:
             res["thread"] = tid
         tid = thread["id"] if isinstance(thread, dict) else thread
 
+        # 去重：同一件事说过就不再存第二份，只强化旧的那条。
+        # 库里已经出现过「我在飞书里怎么看上下文」存两条这种，白占预算。
+        try:
+            from .atomic import similarity
+            body = info.get("content") or text
+            recent = self.db.query(
+                "SELECT id, content, summary FROM memories "
+                "WHERE status='active' AND layer=? ORDER BY created DESC LIMIT 80",
+                (info["layer"],),
+            )
+            for r in recent:
+                if similarity(body, (r["summary"] or r["content"] or "")) >= 0.82:
+                    old_m = self.db.get_memory(r["id"])
+                    self.db.update_memory(
+                        r["id"],
+                        recall_count=int(old_m["recall_count"] or 0) + 1,
+                        last_recalled=time.time(),
+                    )
+                    res["memories"].append({"dup_of": r["id"]})
+                    return res
+        except Exception:
+            pass
+
         mid = self.db.add_memory(
             layer=info["layer"],
             thread_id=tid,
@@ -79,9 +118,17 @@ class Writer:
             protected=info["protected"],
             entities=info["entities"],
             tags=[info["layer"]],
+            created=ts,
             provenance={"session": session, "turn": turn, "quote": text[:200]},
         )
         res["memories"].append(mid)
+
+        # 新记忆立刻连边，否则图谱永远是今天的样子
+        try:
+            from . import graph as _graph
+            _graph.link_new(self.db, mid)
+        except Exception:
+            pass
 
         # 未闭合事项
         for kind, title in info["loops"]:
