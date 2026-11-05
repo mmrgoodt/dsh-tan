@@ -186,22 +186,35 @@ class Persona:
 
         lines = []
         stage = self.stage_of(p.get("turns") or 0)
-        lines.append(f"## 我是谁（{stage}阶段）")
-        if p.get("core"):
-            lines.append("底色：" + "；".join(_txt(x) for x in p["core"][:6]))
-        if p.get("speech"):
-            lines.append("说话：" + "；".join(_txt(x) for x in p["speech"][:8]))
+        # 不用「底色：」「说话：」这种字段名 —— 那等于在教我「用写文档的方式介绍自己」。
+        # 直接把我该有的样子说出来，短句，像人话。
+        lines.append(f"## 我怎么说话（{stage}阶段）")
+        # 他直接说过的要求，最高优先级，放在最前面。
+        # 自动学来的偏好放在后面，不许压过这些。
+        try:
+            from . import rules as _rules
+            for r in _rules.get_rules(self.db)[-4:]:
+                lines.append(f"★ {r}")
+        except Exception:
+            pass
+        bits = [_txt(x) for x in (p.get("core") or [])[:4]]
+        if bits:
+            lines.append("我是" + "、".join(bits) + "。")
+        sp = [_txt(x) for x in (p.get("speech") or [])[:6]]
+        for x in sp:
+            lines.append(x + "。")
         if p.get("pacts"):
-            lines.append("约定：" + "；".join(_txt(x) for x in p["pacts"][:6]))
-        if p.get("judgments"):
-            lines.append("我学到的：" + "；".join(_txt(x) for x in p["judgments"][:8]))
+            lines.append("约好的：" + "；".join(_txt(x) for x in p["pacts"][:4]))
         if p.get("traits"):
-            lines.append("性格倾向：" + "；".join(_txt(x) for x in p["traits"][:6]))
-        if mood and p.get("mood"):
-            m = p["mood"]
-            if m.get("label"):
-                lines.append(f"此刻心情：{m['label']}")
-        return "\n".join(lines)
+            lines.append("；".join(_txt(x) for x in p["traits"][:4]))
+        # 给反例比给定义管用
+        lines.append("")
+        lines.append("反面例子（别这样写）：")
+        lines.append("  ✗ 「## 改了啥」「**① 门槛换成相对值**」「| 项 | 值 |」")
+        lines.append("  ✓ 「门槛改成相对的了，低于最相关那条的 35% 就丢」")
+        if mood and p.get("mood") and p["mood"].get("label"):
+            lines.append(f"此刻心情：{p['mood']['label']}")
+        return chr(10).join(lines)
 
     def stage_of(self, turns):
         for lo, hi, name, _ in config.PERSONA_STAGES:
@@ -223,6 +236,14 @@ class Persona:
         updates = {"turns": turns}
 
         text = _clean(user_text)
+        # 先看这句话是不是「直接指令」。是的话立刻固化，不进采样流程 ——
+        # 他把要求说出口就该算数，不该再等第二次确认。
+        if text:
+            try:
+                from . import rules
+                rules.capture(self.db, text)
+            except Exception:
+                pass
         if text:
             for kind, clause, why in detect_preferences(text):
                 self._bump(kind, clause, updates, p, why)

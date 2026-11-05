@@ -226,6 +226,11 @@ _HOST_BLOCK = re.compile(
 _MARK_SEEN = {}
 _MARK_WINDOW = 6.0
 
+# /context 短缓存：一个 turn 里宿主可能连调好几次（assemble 会重复触发），
+# 每次都要过一遍激活扩散。2 秒内同样的 query 直接复用。
+_CTX_CACHE = {}
+_CTX_TTL = 2.0
+
 
 def sanitize_query(q):
     """去掉宿主注入块；剩下的如果没有实词，返回空串（交给 build_recent 兜底）"""
@@ -342,6 +347,17 @@ class Handler(BaseHTTPRequestHandler):
 
     # ================= GET =================
     def do_GET(self):
+        try:
+            return self._do_get()
+        except Exception as e:
+            import traceback
+            traceback.print_exc()
+            try:
+                json_resp(self, {"ok": False, "error": "服务端异常: %s" % e}, 500)
+            except Exception:
+                pass
+
+    def _do_get(self):
         if not self._authorized():
             return self._deny()
         p = urlparse(self.path)
@@ -417,6 +433,19 @@ class Handler(BaseHTTPRequestHandler):
 
     # ================= POST =================
     def do_POST(self):
+        # 一个 handler 抛异常不该让整条连接断掉 ——
+        # 之前 NameError 直接 RemoteDisconnected，插件那边什么线索都拿不到。
+        try:
+            return self._do_post()
+        except Exception as e:
+            import traceback
+            traceback.print_exc()
+            try:
+                json_resp(self, {"ok": False, "error": "服务端异常: %s" % e}, 500)
+            except Exception:
+                pass
+
+    def _do_post(self):
         if not self._authorized():
             return self._deny()
         global H
@@ -457,6 +486,10 @@ class Handler(BaseHTTPRequestHandler):
 
         if path == "/context":
             q = sanitize_query(body.get("query") or "")
+            _now = time.time()
+            _hit = _CTX_CACHE.get(q)
+            if _hit and (_now - _hit[0]) < _CTX_TTL:
+                return json_resp(self, _hit[1])
             with LOCK:
                 text, meta = H.prepare_context(q)
                 # 强化回路：只有真正进了注入正文的记忆才计一次
@@ -473,7 +506,12 @@ class Handler(BaseHTTPRequestHandler):
                     f.write(_line + chr(10))
             except Exception:
                 pass
-            return json_resp(self, {"text": text, **meta})
+            _resp = {"text": text, **meta}
+            _CTX_CACHE[q] = (time.time(), _resp)
+            if len(_CTX_CACHE) > 64:      # 别让它无限长
+                for k in sorted(_CTX_CACHE, key=lambda k: _CTX_CACHE[k][0])[:32]:
+                    _CTX_CACHE.pop(k, None)
+            return json_resp(self, _resp)
         if path == "/turn":
             with LOCK:
                 r = H.after_turn(

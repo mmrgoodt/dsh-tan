@@ -465,10 +465,13 @@ def drain(raw: bool = False) -> int:
 # ---------------------------------------------------------------- 投递编排
 
 def push(text: str, slot: str = "manual", title: str | None = None) -> dict:
-    """按优先级投递一条消息。
+    """按优先级投递一条消息，并且**总是**写进 pending 队列。
 
-    投递成功 → 不写队列（避免同一句话既弹通知、又在下次对话里再说一遍）
-    全部通道失败 → 才写进 pending.jsonl，由 DSH 插件下次对话带出来
+    原来的逻辑是「投递成功就不写队列」，本意是避免同一句话弹完通知又在对话里说一遍。
+    但结果是：Windows 弹窗一直成功 → 队列永远是空的 → 聊天窗口里永远看不到，
+    你只会看到一闪而过的通知，转头就忘了。
+
+    现在改成两条腿都走：通知负责提醒，队列负责在下一次对话里真的说出来。
     """
     result = {"feishu": False, "windows": "", "queued": False, "channel": "queue"}
 
@@ -478,6 +481,7 @@ def push(text: str, slot: str = "manual", title: str | None = None) -> dict:
         result["feishu"] = send_feishu(text, hook)
         if result["feishu"]:
             result["channel"] = "feishu"
+            result["queued"] = enqueue(text, slot)
             return result
 
     # ② 飞书没配（或失败）→ Windows 通知
@@ -485,6 +489,8 @@ def push(text: str, slot: str = "manual", title: str | None = None) -> dict:
     result["windows"] = channel
     if channel:
         result["channel"] = f"windows:{channel}"
+        # 通知弹过了，但还是要入队 —— 聊天窗口才是他真正会看的地方
+        result["queued"] = enqueue(text, slot)
         return result
 
     # ③ 全挂 → 入队兜底（下次对话播报，不丢）

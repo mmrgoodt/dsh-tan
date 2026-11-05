@@ -1,8 +1,24 @@
 @echo off
-rem 改完 plugin/lib 后跑一次，把文件同步到 DSH 真正加载的位置。
-rem 之前没这一步，两天的插件修改全部无效。
+rem Sync plugin/lib to the path DSH actually loads.
+rem NOTE: keep this file ASCII-only. cmd.exe reads .cmd as GBK on this machine,
+rem and Chinese comments get mangled into bogus commands (earned this the hard way).
+setlocal
+
 set SRC=D:\dsh-tan\plugin\lib
 set DST=C:\Users\admin\.dsh\profiles\desktop\node_modules\dsh-tan\lib
-copy /Y "%SRC%\index.js" "%DST%\index.js" >nul
-copy /Y "%SRC%\memory-tools.js" "%DST%\memory-tools.js" >nul
+
+if not exist "%DST%" (
+  echo [ERROR] target not found: %DST%
+  echo Is the plugin installed into this profile?
+  exit /b 1
+)
+
+copy /Y "%SRC%\index.js" "%DST%\index.js" >nul || goto :fail
+copy /Y "%SRC%\memory-tools.js" "%DST%\memory-tools.js" >nul || goto :fail
+
 echo synced: index.js memory-tools.js
+exit /b 0
+
+:fail
+echo [ERROR] copy failed
+exit /b 1

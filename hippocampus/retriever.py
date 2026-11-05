@@ -344,6 +344,18 @@ class Retriever:
             pass
         _cmax = max(cortex_act.values()) if cortex_act else 0.0
 
+        # 先扫一遍 foc 拿到这次查询的「上限」，后面用它当相对门槛
+        _top_foc = 0.0
+        if terms:
+            try:
+                from . import focus as _fm2
+                for _m in mems:
+                    _v = _fm2.focus(_m["id"], terms)
+                    if _v > _top_foc:
+                        _top_foc = _v
+            except Exception:
+                pass
+
         scored = []
         idf = None
         # 先算一次 IDF，把库里不存在的查询词剔掉。
@@ -401,7 +413,10 @@ class Retriever:
             # 会把「只提了一次」的长文（foc≈0.004）拉到 0.08，门槛就形同虚设。
             # 被皮层点亮的记忆不再看字面门槛 ——
             # 它可能是通过概念关联进来的，字面上一个字都不重合，但正是该想起来的
-            if (terms and cn <= 0 and foc < 0.0015
+            # 相对门槛：低于「最相关那条」的 25% 就算顺带提过。
+            # 实测问「迅雷」，真相关 0.011-0.049，噪音 0.003-0.007，中间断得干净。
+            if (terms and cn < 0.55 and _top_foc > 0
+                    and foc < _top_foc * 0.35
                     and m.get("layer") not in ("L4", "L5")):
                 continue
             s = score(m, terms)
@@ -534,6 +549,28 @@ class Retriever:
         except Exception:
             pass
 
+    def _budget_for(self, query, cortex_act):
+        """按问题复杂度决定给几条。
+
+        固定给 6 条是偷懒：问「迅雷」要的就是那两三条，
+        问「这个项目整体做到哪一步」才真需要更多上下文。
+        该给的地方给足，不该给的一个字都别多。
+        """
+        base = getattr(config, "INJECT_MAX_ITEMS", 6)
+        q = (query or "").strip()
+        n_chars = len([c for c in q if not c.isspace()])
+
+        n = base
+        if n_chars <= 6:                 # 问得具体，答案就那几条
+            n = max(3, base - 2)
+        if any(k in q for k in ("整体", "全部", "所有", "哪些", "为什么", "怎么",
+                                "哪一步", "过程", "历史", "总结", "梳理")):
+            n = base + 2                 # 笼统 / 追根究底，需要拼多块
+        if cortex_act and max(cortex_act.values()) < 0.35:
+            n += 1                       # 分数低说明在摸索，多给一条兜底
+
+        return max(3, min(9, n))
+
     def build_context(self, query="", current_thread=None, budget=None):
         """返回 (文本, 使用的记忆列表, token 占用)"""
         budget = budget or dict(config.BUDGET)
@@ -543,7 +580,14 @@ class Retriever:
         # 不再按「身份/方法/事实/情景」固定顺序装桶。
         # 那样做的后果是：一条跟查询无关的 L3 方法记忆永远排第一，只因为类别靠前。
         # 大脑不是按分类说话的，是想到什么说什么。
-        max_items = getattr(config, "INJECT_MAX_ITEMS", 6)
+        # cortex_act 是 recall 里的局部变量，这里拿不到，重新算一次（有缓存，很快）
+        _act = {}
+        try:
+            from . import cortex as _cx
+            _act = dict(_cx.activate(self.db, query, limit=6))
+        except Exception:
+            pass
+        max_items = self._budget_for(query, _act)
         # 默认 0：身份记忆不再无条件占前两位。
         # 「我是谁」只在该被想起的时候出现（问说话方式、问偏好），
         # 而不是问「迅雷」也先塞两条「喜欢可爱轻松的语气」。
@@ -616,9 +660,12 @@ class Retriever:
             body = m.get("content") or body
         # 单条注入上限：预算按 SINGLE_ITEM_MAX 算，正文却按原样塞，就会超支。
         # 一条 800 字的汇报能把整个 semantic 仓吃光，其余真命中全被挤掉。
-        body = (body or "").strip()
-        if len(body) > 260:
-            body = body[:259].rstrip() + "…"
+        #
+        # 还要先把换行压成空格：一条记忆如果自带多行（markdown 表格、代码块残留），
+        # 渲染出来会变成五六行，每行都算 token，看着像一条实际吃三份钱。
+        body = " ".join((body or "").split())
+        if len(body) > 200:
+            body = body[:199].rstrip() + "…"
         return f"· [{tag}·{when}] {body}"
 
     def mark_used(self, mems, rejected=False):

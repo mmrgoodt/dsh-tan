@@ -187,6 +187,10 @@ def activate(db, query, limit=8, hops=MAX_HOP):
             a = _idf(known.get(c, 1))
             if a > act.get(c, 0.0):
                 act[c] = a
+
+    # 试过把中文单字也当弱信号，想让「记忆系统用什么库」里的「库」活下来，
+    # 结果「我在飞书里用什么办法」占了「用/什/么」三个字，直接顶到第一位 ——
+    # 单字信号噪音远大于信号，撤掉。这类查询要靠真语义，规则救不了。
     if not act:
         return []
     # 别名：命中「迅雷」时把「thunder」一起点亮，反之亦然。
@@ -210,26 +214,30 @@ def activate(db, query, limit=8, hops=MAX_HOP):
     if _mx > 0:
         act = {c: a / _mx for c, a in act.items()}
 
-    frontier = dict(act)
-    for _ in range(hops):
-        nxt = {}
-        for c, a in frontier.items():
-            if a < MIN_ACTIVATION:
-                continue
-            for r in db.query(
-                "SELECT a, b, weight FROM synapses WHERE a=? OR b=? "
-                "ORDER BY weight DESC LIMIT 24", (c, c)
-            ):
-                other = r["b"] if r["a"] == c else r["a"]
-                gain = a * min(1.0, r["weight"] / 4.0) * HOP_DECAY
-                if gain > nxt.get(other, 0.0):
-                    nxt[other] = gain
-        for c, a in nxt.items():
-            if a > act.get(c, 0.0):
-                act[c] = a
-        frontier = nxt
-        if not frontier:
-            break
+    # 扩散和反查都用同一个连接。
+    # db.query() 每次 connect+close，几百次下来光开关连接就 0.4 秒 ——
+    # 之前 recall 平均 0.22 秒，八成耗在这。
+    with db.conn() as con:
+        frontier = dict(act)
+        for _ in range(hops):
+            nxt = {}
+            for c, a in frontier.items():
+                if a < MIN_ACTIVATION:
+                    continue
+                for r in con.execute(
+                    "SELECT a, b, weight FROM synapses WHERE a=? OR b=? "
+                    "ORDER BY weight DESC LIMIT 24", (c, c)
+                ):
+                    other = r["b"] if r["a"] == c else r["a"]
+                    gain = a * min(1.0, r["weight"] / 4.0) * HOP_DECAY
+                    if gain > nxt.get(other, 0.0):
+                        nxt[other] = gain
+            for c, a in nxt.items():
+                if a > act.get(c, 0.0):
+                    act[c] = a
+            frontier = nxt
+            if not frontier:
+                break
 
     # —— 侧抑制 ——
     # 不加这一步的话，扩散会把几百个概念都带上分，反查出来是一锅粥。
@@ -245,11 +253,15 @@ def activate(db, query, limit=8, hops=MAX_HOP):
             act[c] = (a / top) ** INHIBIT_GAMMA if top > 0 else 0.0
 
     scores = {}
-    for c, a in act.items():
-        if a < MIN_ACTIVATION:
-            continue
-        for r in db.query("SELECT memory_id, salience FROM traces WHERE concept=?", (c,)):
-            scores[r["memory_id"]] = scores.get(r["memory_id"], 0.0) + a * float(r["salience"] or 1.0)
+    with db.conn() as con:
+        for c, a in act.items():
+            if a < MIN_ACTIVATION:
+                continue
+            for r in con.execute(
+                "SELECT memory_id, salience FROM traces WHERE concept=?", (c,)
+            ):
+                scores[r["memory_id"]] = (
+                    scores.get(r["memory_id"], 0.0) + a * float(r["salience"] or 1.0))
 
     return sorted(scores.items(), key=lambda x: -x[1])[:limit]
 

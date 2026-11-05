@@ -175,11 +175,23 @@ def list_local(db_dir):
     return out
 
 
-def make_local_backup(db_path):
-    """在 backup/ 下生成一个带时间戳的副本"""
+def make_local_backup(db_path, prefix="manual", keep=7):
+    """在 backup/ 下生成一个带时间戳的副本
+
+    keep: 只留最近几个自动备份，不然 3MB × 每天会把盘塞满。
+    """
     db_path = Path(db_path)
     d = db_path.parent / "backup"
     d.mkdir(parents=True, exist_ok=True)
-    dst = d / ("manual-" + time.strftime("%Y%m%d-%H%M%S") + ".db")
+    dst = d / (prefix + "-" + time.strftime("%Y%m%d-%H%M%S") + ".db")
     shutil.copy2(db_path, dst)
+
+    # 只清自动备份，manual- 和别的历史文件不动
+    try:
+        autos = sorted([p for p in d.glob("auto-*.db")], key=lambda p: p.stat().st_mtime)
+        for old_file in autos[:-keep]:
+            old_file.unlink(missing_ok=True)
+    except Exception:
+        pass
+
     return {"ok": True, "path": str(dst), "bytes": dst.stat().st_size}

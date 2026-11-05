@@ -124,6 +124,14 @@ class Hippocampus:
             _sleep.sleep(self.db)
         except Exception:
             pass
+        # 自动备份。之前 backup.py 写好了但 engine 一次都没调过 ——
+        # 数据库要是崩了，就真没了。留最近 7 份。
+        try:
+            from . import backup as _bk
+            _bk.make_local_backup(str(self.db.path), prefix="auto", keep=7)
+        except Exception:
+            pass
+
         # 重建预测表：对话序列每天在变，「问完 A 接着问 B」的规律要跟着更新
         try:
             from . import predict as _predict

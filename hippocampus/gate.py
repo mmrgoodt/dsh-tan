@@ -1,78 +1,92 @@
 # -*- coding: utf-8 -*-
-"""收紧 /turn 的自动抽取
+"""写入闸：只留有价值的进长期记忆
 
-问题：360 条记忆里 256 条是「我重启了一下」「我觉得还要优化」这种流水账，
-全都挂在事实层抢注入预算。数据库大不等于记得多。
-
-现在 memory_save 工具已经通了，真正重要的东西由我主动记。
-所以 /turn 这条自动通道可以收紧：**只留带具体坐标的、或者明确是决策/教训的**。
+/turn 原来是「什么都记」，360 条里 256 条是流水账，抢的是真事的注入预算。
+现在 memory_save 由我主动写重要的，所以这条自动通道可以收紧。
 
 判据（任一命中才存）：
-  · 有路径 / 代码 / 版本号 / 注册表 / URL
-  · 是明确的决定（决定、以后都、不用了、改成）
-  · 是教训（别再、坑、注意）
-  · 用户明确要求记（记住、记着）
+  · 有路径 / 代码 / 版本 / 注册表 / URL / 扩展名
+  · 提到目录、路径、文件夹（短句才算）
+  · 是明确的决定（决定、以后都、改成、别再）
+  · 是教训 / 明确要求记住
 
-其余的丢掉。宁可漏，不要塞。
+写成函数而不是一条大正则 —— 之前那条正则里 \\b\\d+\\.\\d+\\.\\d+\\b
+连 v24.22.1 都匹配不到（v 和 2 都是 \\w，中间没有词边界），3.15 又只有两段。
+拆开写反而不会出错。
 """
-import io
 import re
 
-# 具体坐标
-INFO = re.compile(
-    r"[A-Za-z]:\\|/[\w.]{2,}/|```|https?://|\b\d+\.\d+\.\d+\b|"
-    r"\b(HKCU|HKLM|HKEY_)\b|\bSoftware\\|"
-    r"\.(py|js|json|yml|yaml|md|db|exe|bat|ps1|toml)\b"
-)
-# 决定 / 教训 / 明确要求记住
-DECISION = re.compile(
+_EXT = re.compile(r"\.(py|js|json|yml|yaml|md|db|exe|bat|ps1|toml|txt|log)\b")
+_VER = re.compile(r"\d+\.\d+")
+_PATH = re.compile(r"[A-Za-z]:[\\/]")
+_CNNAME = re.compile(r"[\w\u4e00-\u9fa5]{2,}_[\w\u4e00-\u9fa5]{2,}")
+_DIRHINT = re.compile(r"(目录|路径|文件夹|保存在|存在哪|放在哪)")
+_DECISION = re.compile(
     r"(决定|以后都|以后就|改成|换成|不用了|不再|别再|不要了|定下来|就这么办|"
-    r"记住|记着|坑|教训|注意|小心|必须|千万不要)"
+    r"记住|记着|坑|教训|必须|千万不要)"
 )
+
+
+def has_info(text):
+    """有没有可复用的坐标"""
+    t = text or ""
+    if not t:
+        return False
+    if _PATH.search(t):
+        return True
+    if "http://" in t or "https://" in t or "```" in t:
+        return True
+    if "HKCU" in t or "HKLM" in t or "HKEY_" in t:
+        return True
+    if _EXT.search(t):
+        return True
+    if _CNNAME.search(t):
+        return True
+    if _VER.search(t):
+        return True
+    if _DIRHINT.search(t) and len(t) < 60:
+        return True
+    return False
 
 
 def should_keep(text, layer):
     """这条值不值得进长期记忆"""
     if layer in ("L2-", "L3", "L4", "L5"):
-        return True          # 教训 / 方法 / 身份，本来就稀有
-    t = text or ""
+        return True
+    t = (text or "").strip()
     if len(t) < 8:
-        return False         # 太短，没信息
-    if INFO.search(t):
-        return True          # 有具体坐标
-    if DECISION.search(t):
-        return True          # 是决定或教训
+        return False
+    if has_info(t):
+        return True
+    if _DECISION.search(t):
+        return True
     return False
 
 
 def install_gate():
-    """给 writer 装上这道闸"""
+    """给 writer 装上这道闸（幂等）"""
+    import io
     p = "hippocampus/writer.py"
     s = io.open(p, encoding="utf-8").read()
     if "should_keep" in s:
         print("闸已经装过了")
         return False
-
-    old = '''    def _ingest_one(self, text, role, session, turn, context_note, ts=None):
-        info = extractor.extract(text, role)'''
-    new = '''    def _ingest_one(self, text, role, session, turn, context_note, ts=None):
-        info = extractor.extract(text, role)
-        # 只留有价值的：有具体坐标，或者明确是决策/教训。
-        # 不加这道闸，360 条里 256 条是流水账，抢的是真事的预算。
-        try:
-            from .gate import should_keep
-            if info.get("keep") and not info.get("noise"):
-                if not should_keep(info.get("content") or text, info.get("layer")):
-                    return {"memories": [], "loops": [], "noise": 0, "thread": None}
-        except Exception:
-            pass'''
+    old = "    def _ingest_one(self, text, role, session, turn, context_note, ts=None):\n        info = extractor.extract(text, role)"
+    new = (
+        "    def _ingest_one(self, text, role, session, turn, context_note, ts=None):\n"
+        "        info = extractor.extract(text, role)\n"
+        "        # 只留有价值的：有具体坐标，或者明确是决策/教训。\n"
+        "        # noise 也要过闸，否则「好的没问题」会从后门进来。\n"
+        "        try:\n"
+        "            from .gate import should_keep\n"
+        "            if info.get(\"keep\"):\n"
+        "                if not should_keep(info.get(\"content\") or text, info.get(\"layer\")):\n"
+        "                    return {\"memories\": [], \"loops\": [], \"noise\": 0, \"thread\": None}\n"
+        "        except Exception:\n"
+        "            pass"
+    )
     if old not in s:
-        raise SystemExit("MISS: writer._ingest_one")
-    s = s.replace(old, new, 1)
-    io.open(p, "w", encoding="utf-8", newline="\n").write(s)
+        raise SystemExit("MISS")
+    io.open(p, "w", encoding="utf-8", newline="\n").write(s.replace(old, new, 1))
     print("闸已装到 writer")
     return True
-
-
-if __name__ == "__main__":
-    install_gate()

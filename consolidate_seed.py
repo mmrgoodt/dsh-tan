@@ -14,11 +14,15 @@ import urllib.request
 
 API = "http://127.0.0.1:18765/mem/save"
 
+# 注意：这个文件是**模板**，里的名字、路径、公司都换成了占位符。
+# 真数据只在他本机的 memory.db 里，不进仓库 —— 别人 clone 下来跑这个脚本，
+# 写进去的是占位符，不是他的真实记忆。
+#
 # kind: fact 事实 / preference 偏好 / lesson 教训 / method 方法
 CONSOLIDATED = [
     ("这台机器的开发环境：Windows 11，用户 admin。Node v24.22.1 装在 "
      "C:\\Program Files\\nodejs（不在默认 PATH 里，命令行直接敲 node 会找不到，要用完整路径）。"
-     "Python 3.15，Git 全局身份 mmrgoodt / 61918816@qq.com。全局 npm 包在 AppData\\Roaming\\npm。",
+     "Python 3.15，Git 全局身份 <github-user> / <email>。全局 npm 包在 AppData\\Roaming\\npm。",
      "fact", "环境"),
 
     ("本机网络走 Clash Verge 的 TUN 模式：虚拟网卡叫 Meta，DNS 走 198.18.0.2（fake-ip 段，"
@@ -31,8 +35,8 @@ CONSOLIDATED = [
      "而不是「你努力了」。",
      "preference", "说话方式"),
 
-    ("他做两套经营主体：西安先开商贸有限公司和咸阳个体户，鲜果通小程序是主要业务。"
-     "账号密码总清单在 D:\\先开鲜果通项目\\00_账号与说明\\密码清单.md，"
+    ("他做两套经营主体：<公司A>和<个体户B>，<业务名>小程序是主要业务。"
+     "账号密码总清单在 D:\\<项目目录>\\<账号目录>\\<密码文件>，"
      "这个文件必须保持不入 git、仓库必须私有。",
      "fact", "业务"),
 
